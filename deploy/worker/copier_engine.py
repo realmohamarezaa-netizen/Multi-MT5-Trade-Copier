@@ -28,11 +28,13 @@ Run:  python copier_engine.py          (or the packaged MT5CopierEngine.exe)
 import asyncio
 import json
 import os
+import socket
 import sqlite3
 import sys
 import time
 import traceback
 import urllib.parse
+import webbrowser
 from pathlib import Path
 
 if getattr(sys, "frozen", False):
@@ -1421,6 +1423,62 @@ async def serve_static(path, writer):
 # Main
 # ----------------------------------------------------------------------------
 
+def dashboard_url() -> str:
+    return f"http://{HTTP_HOST}:{HTTP_PORT}"
+
+
+def browser_disabled() -> bool:
+    if "--no-browser" in sys.argv:
+        return True
+    return os.environ.get("COPIER_NO_BROWSER", "").strip().lower() in {"1", "true", "yes"}
+
+
+def already_running() -> bool:
+    """True when another engine instance already owns the dashboard port."""
+    try:
+        with socket.create_connection((HTTP_HOST, HTTP_PORT), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+def open_dashboard() -> bool:
+    """Open the dashboard in the user's default browser (best effort)."""
+    if browser_disabled():
+        return False
+    url = dashboard_url()
+    try:
+        if sys.platform == "win32":
+            os.startfile(url)  # type: ignore[attr-defined]  # noqa: S606
+            return True
+    except Exception:
+        pass
+    try:
+        return bool(webbrowser.open(url, new=2))
+    except Exception:
+        return False
+
+
+def print_ready_banner(dashboard_opened: bool) -> None:
+    """Friendly bilingual banner so the black console window is not scary."""
+    url = dashboard_url()
+    line = "=" * 66
+    opened_en = ("Dashboard opened in your browser" if dashboard_opened
+                 else f"Open the dashboard in your browser: {url}")
+    print("\n" + line)
+    print("  Multi-MT5 Trade Copier is RUNNING - everything is OK.")
+    print(f"  Dashboard: {url}")
+    print(f"  {opened_en}.")
+    print("  KEEP THIS WINDOW OPEN - it is the engine console.")
+    print("  Closing this window (or Ctrl+C) stops the copier.")
+    try:
+        # Persian line: skipped automatically if the console cannot render it.
+        print("  — داشبورد در مرورگر شما باز شد — این پنجره را نبندید —")
+    except Exception:
+        pass
+    print(line + "\n", flush=True)
+
+
 async def main():
     settings = get_settings()
     DB.x("UPDATE app_settings SET engine_running=1, booted_at=? WHERE id='singleton'", (now_ms(),))
@@ -1433,11 +1491,24 @@ async def main():
     http = await asyncio.start_server(http_handler, HTTP_HOST, HTTP_PORT)
     log("success", "engine", f"TCP bridge listening on {TCP_HOST}:{TCP_PORT}")
     log("success", "engine", f"Dashboard/API on http://{HTTP_HOST}:{HTTP_PORT}")
+    opened = open_dashboard()
+    print_ready_banner(opened)
     async with tcp, http:
         await asyncio.gather(tcp.serve_forever(), http.serve_forever())
 
 
 if __name__ == "__main__":
+    # Friendly double-click guard: when the engine is already running, a
+    # second launch just re-opens the dashboard instead of a port error.
+    if already_running():
+        print("Engine is already running - dashboard: " + dashboard_url())
+        if not browser_disabled():
+            open_dashboard()
+        try:
+            input("Press Enter to exit...")
+        except Exception:
+            pass
+        sys.exit(0)
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
