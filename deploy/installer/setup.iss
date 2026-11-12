@@ -23,7 +23,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 ArchitecturesAllowed=x64compatible
 WizardStyle=modern
 PrivilegesRequired=admin
-SetupIconFile=icon.ico
+; SetupIconFile=icon.ico
 ; Remove SetupIconFile line if icon.ico is not provided
 
 [Languages]

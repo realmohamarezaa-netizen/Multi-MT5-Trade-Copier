@@ -29,11 +29,16 @@ import asyncio
 import json
 import os
 import sqlite3
+import sys
 import time
 import urllib.parse
 from pathlib import Path
 
-BASE = Path(__file__).resolve().parent
+if getattr(sys, "frozen", False):
+    # PyInstaller onedir: keep db/ and ui/ next to the EXE, not inside _internal/
+    BASE = Path(sys.executable).resolve().parent
+else:
+    BASE = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get("COPIER_DB", BASE / "db" / "mt5copier.db"))
 UI_DIR = Path(os.environ.get("COPIER_UI", BASE / "ui"))
 TCP_HOST = "127.0.0.1"
