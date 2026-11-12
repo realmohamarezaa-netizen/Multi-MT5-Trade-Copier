@@ -40,5 +40,6 @@ exe = EXE(
     upx=False,
     console=True,  # keep the console: live engine logs are useful on a trade PC
     exclude_binaries=False,  # ONEFILE: pack everything into the EXE
-    icon=None,
+    icon="icon.ico",           # app icon (embedded resource)
+    version="version_info.txt" # Windows file Properties -> Details metadata
 )

@@ -72,3 +72,6 @@ deploy/installer/Output/
 # python bytecode
 __pycache__/
 *.pyc
+
+# chat upload folder (not project content)
+/upload/

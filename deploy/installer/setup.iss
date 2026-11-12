@@ -5,7 +5,7 @@
 ; ============================================================
 
 #define MyAppName "Multi-MT5 Trade Copier"
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "1.2.0"
 #define MyAppExeName "MT5CopierEngine.exe"
 
 [Setup]
@@ -13,9 +13,12 @@ AppId={{8C1B6E9A-52D4-4B7E-9C3F-MT5COPIER100}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppVerName={#MyAppName} {#MyAppVersion}
+AppPublisher=Multi-MT5 Trade Copier Project
+AppCopyright=MIT License
 DefaultDirName={autopf}\MT5Copier
 DefaultGroupName={#MyAppName}
 UninstallDisplayIcon={app}\{#MyAppExeName}
+SetupLogging=yes
 OutputBaseFilename=MT5Copier-Setup
 Compression=lzma2
 SolidCompression=yes
@@ -23,8 +26,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 ArchitecturesAllowed=x64compatible
 WizardStyle=modern
 PrivilegesRequired=admin
-; SetupIconFile=icon.ico
-; Remove SetupIconFile line if icon.ico is not provided
+SetupIconFile=icon.ico
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

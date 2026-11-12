@@ -81,12 +81,25 @@ jobs:
           $setup = Get-Item "deploy/installer/Output/MT5Copier-Setup.exe"
           Write-Host ("Installer size: {0:N0} bytes" -f $setup.Length)
 
-      - name: Upload installer + portable ZIP to GitHub Release Assets
+      - name: Generate SHA256 checksums
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $files = @("deploy/installer/Output/MT5Copier-Setup.exe", "MT5Copier-Windows-x64.zip")
+          $lines = foreach ($f in $files) {
+            $h = (Get-FileHash -Algorithm SHA256 $f).Hash.ToLower()
+            "$h  $(Split-Path $f -Leaf)"
+          }
+          $lines | Set-Content -Encoding UTF8 "CHECKSUMS-SHA256.txt"
+          Get-Content "CHECKSUMS-SHA256.txt"
+
+      - name: Upload installer + portable ZIP + checksums to GitHub Release Assets
         if: github.event_name == 'push' || inputs.release_tag != ''
         uses: softprops/action-gh-release@v2
         with:
           files: |
             deploy/installer/Output/MT5Copier-Setup.exe
             MT5Copier-Windows-x64.zip
+            CHECKSUMS-SHA256.txt
           tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
           fail_on_unmatched_files: true
