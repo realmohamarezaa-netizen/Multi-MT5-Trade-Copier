@@ -5,7 +5,7 @@
 ; ============================================================
 
 #define MyAppName "Multi-MT5 Trade Copier"
-#define MyAppVersion "1.2.0"
+#define MyAppVersion "1.3.0"
 #define MyAppExeName "MT5CopierEngine.exe"
 
 [Setup]

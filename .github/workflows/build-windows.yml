@@ -57,6 +57,7 @@ jobs:
           Copy-Item -Recurse -Force "deploy/docs/FA" (Join-Path $out "docs")
           Copy-Item -Force "deploy/INSTALL-FA.md" $out
           Copy-Item -Force "deploy/README-FA.md" $out
+          Copy-Item -Force "deploy/FIRST-TIME-FA.txt" $out
 
           Compress-Archive -Path $out -DestinationPath "MT5Copier-Windows-x64.zip" -Force
           $zip = Get-Item "MT5Copier-Windows-x64.zip"

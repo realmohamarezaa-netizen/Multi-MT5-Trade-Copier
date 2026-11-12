@@ -17,6 +17,7 @@ copy /y "..\mql5\MT5CopierEA.mq5" "%OUT%\" >nul
 xcopy /e /i /y "..\docs\FA\*" "%OUT%\docs\" >nul
 copy /y "..\INSTALL-FA.md" "%OUT%\" >nul
 copy /y "..\README-FA.md" "%OUT%\" >nul
+copy /y "..\FIRST-TIME-FA.txt" "%OUT%\" >nul
 powershell -NoProfile -Command "Compress-Archive -Path '%OUT%\*' -DestinationPath 'MT5Copier-Portable.zip' -Force"
 echo.
 echo PORTABLE OK: %CD%\MT5Copier-Portable.zip
