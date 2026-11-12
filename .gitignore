@@ -52,3 +52,15 @@ prompt
 server.log
 # Skills directory
 /skills/
+# ---- Multi-MT5 Trade Copier repo hygiene ----
+# runtime database files (keep the folder via .gitkeep)
+db/*.db
+db/*.db-journal
+# sandbox-only folders (not part of the product)
+/agent-ctx
+/download
+/examples
+/mini-services
+/tests
+# allow the env example
+!.env.example
