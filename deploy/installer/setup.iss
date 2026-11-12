@@ -5,7 +5,7 @@
 ; ============================================================
 
 #define MyAppName "Multi-MT5 Trade Copier"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppExeName "MT5CopierEngine.exe"
 
 [Setup]
@@ -28,10 +28,6 @@ PrivilegesRequired=admin
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
-
-[CustomMessages]
-eng.CreateDesktopIcon=Create a &desktop shortcut
-eng.FirewallNote=Windows Firewall may ask for permission - the engine only listens on 127.0.0.1 (localhost) and never accesses the internet.
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "Additional icons:"
