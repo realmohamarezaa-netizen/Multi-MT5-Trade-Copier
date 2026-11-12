@@ -5,7 +5,7 @@
 ; ============================================================
 
 #define MyAppName "Multi-MT5 Trade Copier"
-#define MyAppVersion "1.3.0"
+#define MyAppVersion "1.4.0"
 #define MyAppExeName "MT5CopierEngine.exe"
 
 [Setup]
@@ -27,6 +27,9 @@ ArchitecturesAllowed=x64compatible
 WizardStyle=modern
 PrivilegesRequired=admin
 SetupIconFile=icon.ico
+; Gracefully close a running engine during install/uninstall (Restart Manager)
+CloseApplications=yes
+RestartApplications=no
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -56,7 +59,9 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "MT5CopierEngine"; ValueData: """{app}\{#MyAppExeName}"""; Flags: uninsdeletevalue; Tasks: autostart
 
 [Run]
+; The engine opens the dashboard in the default browser by itself.
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
-; Nothing else to clean - the engine does not install drivers or services.
+; Force-stop the console engine before file deletion (exit 0 = never blocks).
+Filename: "{sys}\cmd.exe"; Parameters: "/C taskkill /f /im MT5CopierEngine.exe & exit /b 0"; Flags: runhidden; RunOnceId: "KillEngine"

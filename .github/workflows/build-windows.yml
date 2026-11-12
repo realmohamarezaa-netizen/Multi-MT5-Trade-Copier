@@ -27,6 +27,12 @@ permissions:
 jobs:
   build-windows:
     runs-on: windows-latest
+    env:
+      # Optional authentic code signing: add repo secrets SIGNING_PFX (base64
+      # of the .pfx certificate) + SIGNING_PFX_PASSWORD and re-run the build.
+      # A signed EXE removes SmartScreen ("Windows protected your PC").
+      SIGNING_PFX: ${{ secrets.SIGNING_PFX }}
+      SIGNING_PFX_PASSWORD: ${{ secrets.SIGNING_PFX_PASSWORD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -58,6 +64,8 @@ jobs:
           Copy-Item -Force "deploy/INSTALL-FA.md" $out
           Copy-Item -Force "deploy/README-FA.md" $out
           Copy-Item -Force "deploy/FIRST-TIME-FA.txt" $out
+          Copy-Item -Force "deploy/installer/easy-install.bat" (Join-Path $out "Easy-Install.bat")
+          Copy-Item -Force "deploy/installer/easy-uninstall.bat" (Join-Path $out "Easy-Uninstall.bat")
 
           Compress-Archive -Path $out -DestinationPath "MT5Copier-Windows-x64.zip" -Force
           $zip = Get-Item "MT5Copier-Windows-x64.zip"
@@ -81,6 +89,28 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed" }
           $setup = Get-Item "deploy/installer/Output/MT5Copier-Setup.exe"
           Write-Host ("Installer size: {0:N0} bytes" -f $setup.Length)
+
+      - name: Code-sign both EXEs (optional - only when SIGNING_PFX secret is set)
+        if: env.SIGNING_PFX != ''
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
+            Where-Object { $_.FullName -match '\\x64\\' } |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signtool) { throw "signtool.exe not found in Windows Kits" }
+          Write-Host "Using signtool: $($signtool.FullName)"
+          $pfx = Join-Path $env:RUNNER_TEMP "signing.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGNING_PFX))
+          try {
+            foreach ($exe in @("deploy/worker/dist/MT5CopierEngine.exe", "deploy/installer/Output/MT5Copier-Setup.exe")) {
+              & $signtool.FullName sign /f $pfx /p $env:SIGNING_PFX_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $exe
+              if ($LASTEXITCODE -ne 0) { throw "signtool failed for $exe" }
+              Write-Host "Signed: $exe"
+            }
+          } finally {
+            Remove-Item -Force $pfx -ErrorAction SilentlyContinue
+          }
 
       - name: Generate SHA256 checksums
         shell: pwsh
