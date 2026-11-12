@@ -32,7 +32,7 @@
 پیش‌نیاز: ویندوز 10/11 x64 و یک بار Python 3.11+ فقط روی سیستم «سازنده» (کاربر نهایی به آن نیاز ندارد):
 
 ```bat
-git clone https://github.com/OWNER/Multi-MT5-Trade-Copier.git
+git clone https://github.com/realmohamarezaa-netizen/Multi-MT5-Trade-Copier.git
 cd Multi-MT5-Trade-Copier\deploy
 
 :: 1) ساخت EXE موتور
@@ -54,7 +54,7 @@ MT5Copier-Portable\start-copier.bat
 این مسیر همان نسخه‌ای است که با شبیه‌ساز ترمینال اجرا می‌شود و برای دیدن کل سیستم بدون MT5 مناسب است:
 
 ```bash
-git clone https://github.com/OWNER/Multi-MT5-Trade-Copier.git
+git clone https://github.com/realmohamarezaa-netizen/Multi-MT5-Trade-Copier.git
 cd Multi-MT5-Trade-Copier
 
 # با Bun (پیشنهادی)
