@@ -1,0 +1,226 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// Multi-MT5 Trade Copier - Local Database Schema
+// All data stays local (SQLite). Nothing is sent externally.
+// ============================================================
+
+// A registered MT5 terminal (simulated here; real via EA+bridge on Windows)
+model Terminal {
+  id            String    @id @default(cuid())
+  name          String
+  broker        String    @default("")
+  server        String    @default("")
+  accountNumber String    @default("")
+  currency      String    @default("USD")
+  exePath       String    @default("")
+  simulated     Boolean   @default(true)
+  role          String    @default("none") // master | slave | none
+  enabled       Boolean   @default(true) // copy enabled (slave)
+  paused        Boolean   @default(false)
+  status        String    @default("disconnected") // connected | connecting | disconnected | reconnecting | error
+  autoReconnect Boolean   @default(true)
+  lastSeen      Float     @default(0) // epoch ms
+  leverage      Int       @default(100)
+  balance       Float     @default(10000)
+  equity        Float     @default(10000)
+  floatingPL    Float     @default(0)
+  freeMargin    Float     @default(10000)
+  marginLevel   Float     @default(0)
+  closedToday   Int       @default(0)
+  reconnectCount Int      @default(0)
+  positions     Position[]
+  closedTrades  ClosedTrade[]
+  slaveSettings SlaveSettings?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+// Per-slave independent copy settings
+model SlaveSettings {
+  id                String  @id @default(cuid())
+  terminalId        String  @unique
+  terminal          Terminal @relation(fields: [terminalId], references: [id], onDelete: Cascade)
+  // Volume
+  lotMode           String  @default("same") // same | fixed | multiplier | balance | risk
+  fixedLot          Float   @default(0.01)
+  multiplier        Float   @default(1)
+  balanceRatioCap   Float   @default(5) // safety cap for balance-ratio scaling
+  riskPercent       Float   @default(1) // risk-based sizing % of equity per SL distance
+  // What to copy
+  copySL            Boolean @default(true)
+  copyTP            Boolean @default(true)
+  copyModifications Boolean @default(true)
+  copyPartialClose  Boolean @default(true)
+  copyPending       Boolean @default(true)
+  closeOnMasterClose Boolean @default(true)
+  // Limits & filters
+  maxSpreadPoints   Int     @default(100)
+  maxLot            Float   @default(100)
+  maxPositions      Int     @default(50)
+  slippagePoints    Int     @default(20)
+  buyEnabled        Boolean @default(true)
+  sellEnabled       Boolean @default(true)
+  symbolWhitelist   String  @default("") // csv, empty = all allowed
+  symbolBlacklist   String  @default("") // csv
+  symbolMapping     String  @default("") // "XAUUSD=GOLD;EURUSD=EURUSD.a"
+  // Sync policy on drift after reconnect/restart
+  syncPolicy        String  @default("report") // report | autoOpenMissing | autoCloseExtra
+  // Simulator-only realism knobs
+  rejectProbability Float   @default(0.03)
+  baseLatencyMs     Int     @default(8) // simulated broker round-trip
+  jitterMs          Int     @default(25)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+// Live open positions / pending orders (mirror of each terminal state)
+model Position {
+  id           String   @id @default(cuid())
+  terminalId   String
+  terminal     Terminal @relation(fields: [terminalId], references: [id], onDelete: Cascade)
+  ticket       String
+  symbol       String
+  side         String   @default("buy") // buy | sell
+  kind         String   @default("position") // position | pending
+  pendingType  String   @default("") // buylimit|selllimit|buystop|sellstop|buystoplimit|sellstoplimit
+  volume       Float
+  openPrice    Float
+  currentPrice Float    @default(0)
+  sl           Float    @default(0)
+  tp           Float    @default(0)
+  profit       Float    @default(0)
+  openTime     Float    @default(0) // epoch ms
+  masterTicket String   @default("") // set for slave copies
+  copiedByEngine Boolean @default(false)
+  @@unique([terminalId, ticket])
+  @@index([terminalId])
+}
+
+// Closed trade history
+model ClosedTrade {
+  id           String   @id @default(cuid())
+  terminalId   String
+  terminal     Terminal @relation(fields: [terminalId], references: [id], onDelete: Cascade)
+  ticket       String
+  symbol       String
+  side         String   @default("buy")
+  kind         String   @default("position")
+  pendingType  String   @default("")
+  volume       Float
+  openPrice    Float
+  closePrice   Float
+  sl           Float    @default(0)
+  tp           Float    @default(0)
+  profit       Float
+  openTime     Float    @default(0)
+  closeTime    Float    @default(0)
+  closeReason  String   @default("manual") // manual | sl | tp | engine | stopout | partial
+  masterTicket String   @default("")
+  @@unique([terminalId, ticket])
+  @@index([terminalId])
+  @@index([closeTime])
+}
+
+// Idempotent copy operation ledger: one row per (slave, eventKey).
+// Guarantees no duplicate orders on retries, reconnects or app restarts.
+model CopyOperation {
+  id              String  @id @default(cuid())
+  masterTerminalId String
+  slaveTerminalId String
+  masterTicket    String
+  slaveTicket     String  @default("")
+  action          String  // open | close | partial | modify_sltp | place_pending | cancel_pending
+  eventKey        String  // unique idempotency key
+  status          String  @default("pending") // pending | sent | executed | failed | skipped | missed
+  failReason      String  @default("")
+  failCode        String  @default("") // spread | filter | offline | broker_reject | invalid_volume | ...
+  detectedAt      Float   @default(0)
+  sentAt          Float   @default(0)
+  ackAt           Float   @default(0)
+  doneAt          Float   @default(0)
+  latencyMs       Int     @default(0) // detect -> ack
+  totalMs         Int     @default(0) // detect -> done
+  payload         String  @default("{}")
+  createdAt       DateTime @default(now())
+  @@unique([slaveTerminalId, eventKey])
+  @@index([masterTicket])
+  @@index([status])
+}
+
+// Latency samples for the Execution Monitor
+model MetricEvent {
+  id              String  @id @default(cuid())
+  ts              Float
+  slaveTerminalId String
+  masterTicket    String
+  action          String
+  detectMs        Int     @default(0)
+  sendMs          Int     @default(0)
+  ackMs           Int     @default(0)
+  totalMs         Int     @default(0)
+  ok              Boolean @default(true)
+  @@index([ts])
+}
+
+// Structured logs
+model LogEntry {
+  id           String  @id @default(cuid())
+  ts           Float
+  level        String  // info | success | warn | error
+  category     String  // connection | trade | copy | engine | sync | settings | test
+  terminalId   String  @default("")
+  terminalName String  @default("")
+  message      String
+  details      String  @default("")
+  @@index([ts])
+  @@index([category])
+}
+
+// Global app settings (singleton row id='singleton')
+model AppSettings {
+  id                String  @id @default("singleton")
+  engineRunning     Boolean @default(false)
+  copyEnabled       Boolean @default(true) // false = Stop Copying pressed
+  emergencyPolicy   String  @default("halt") // halt | halt_close_master | halt_close_all
+  syncOnStart       String  @default("report") // report | autoOpenMissing | autoCloseExtra
+  masterAutoTrade   Boolean @default(true)
+  autoTradeIntervalMs Int   @default(9000)
+  defaultRejectProbability Float @default(0.03)
+  lastEventAt       Float   @default(0)
+  bootedAt          Float   @default(0)
+  updatedAt         DateTime @updatedAt
+}
+
+// Mandatory acceptance test results (section 15 of requirements)
+model TestResult {
+  id          String  @id @default(cuid())
+  runId       String
+  testKey     String
+  title       String
+  status      String  @default("running") // running | pass | fail
+  durationMs  Int     @default(0)
+  detail      String  @default("")
+  latencyMs   Int     @default(0)
+  ts          Float   @default(0)
+  @@index([runId])
+}
+
+// Test run metadata
+model TestRun {
+  id          String  @id @default(cuid())
+  startedAt   Float
+  finishedAt  Float   @default(0)
+  status      String  @default("running") // running | done | failed
+  passed      Int     @default(0)
+  failed      Int     @default(0)
+  avgLatencyMs Int    @default(0)
+  log         String  @default("")
+}
