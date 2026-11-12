@@ -1,9 +1,12 @@
-# Builds the Windows package on every "v*" tag push and attaches the ZIP
-# (containing the real MT5CopierEngine.exe built on windows-latest) to the
-# GitHub Release for that tag, so users can download-and-run directly.
+# Builds the Windows package on every "v*" tag push and attaches BOTH
+# deliverables to the GitHub Release for that tag:
+#   1. MT5Copier-Setup.exe        - real Windows installer (Inno Setup)
+#   2. MT5Copier-Windows-x64.zip  - portable package (no installation)
+# Both contain the ONEFILE MT5CopierEngine.exe with the dashboard embedded,
+# built by PyInstaller on windows-latest.
 #
 # Manual re-run: Actions -> Build Windows EXE Package -> Run workflow,
-# set release_tag (e.g. v1.0.0) to attach to an existing release.
+# set release_tag (e.g. v1.1.0) to attach to an existing release.
 
 name: Build Windows EXE Package
 
@@ -14,7 +17,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Existing release tag to attach the ZIP to (e.g. v1.0.0)"
+        description: "Existing release tag to attach the files to (e.g. v1.1.0)"
         required: false
         default: ""
 
@@ -34,7 +37,7 @@ jobs:
           python-version: "3.11"
           architecture: "x64"
 
-      - name: Build engine EXE (PyInstaller, stdlib-only engine)
+      - name: Build engine EXE (PyInstaller ONEFILE, dashboard embedded)
         working-directory: deploy/worker
         run: |
           python -m pip install --upgrade pip
@@ -48,31 +51,42 @@ jobs:
           $out = "MT5Copier-Portable"
           New-Item -ItemType Directory -Force -Path $out | Out-Null
 
-          # onedir engine build (exe + _internal) produced by the spec
-          Copy-Item -Recurse -Force "deploy/worker/dist/MT5CopierEngine/*" $out
-
-          # exported dashboard (prebuilt and committed at deploy/worker/ui)
-          if (Test-Path "deploy/worker/ui") {
-            Copy-Item -Recurse -Force "deploy/worker/ui" (Join-Path $out "ui")
-          }
-
-          # EA source + Persian docs + launchers
+          Copy-Item -Force "deploy/worker/dist/MT5CopierEngine.exe" $out
+          Copy-Item -Force "deploy/installer/portable-start.bat" (Join-Path $out "start-copier.bat")
           Copy-Item -Force "deploy/mql5/MT5CopierEA.mq5" $out
           Copy-Item -Recurse -Force "deploy/docs/FA" (Join-Path $out "docs")
-          Copy-Item -Force "deploy/README-FA.md" $out
           Copy-Item -Force "deploy/INSTALL-FA.md" $out
-          Copy-Item -Force "deploy/installer/portable-start.bat" (Join-Path $out "start-copier.bat")
+          Copy-Item -Force "deploy/README-FA.md" $out
 
           Compress-Archive -Path $out -DestinationPath "MT5Copier-Windows-x64.zip" -Force
-          Write-Host "---- package contents ----"
-          Get-ChildItem $out | Select-Object Name, Length | Format-Table -AutoSize
           $zip = Get-Item "MT5Copier-Windows-x64.zip"
-          Write-Host ("ZIP size: {0:N0} bytes" -f $zip.Length)
+          Write-Host ("Portable ZIP size: {0:N0} bytes" -f $zip.Length)
 
-      - name: Upload ZIP to GitHub Release Assets
+      - name: Build Windows installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $iscc = @(
+            "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+            "C:\Program Files\Inno Setup 6\ISCC.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) {
+            Write-Host "Inno Setup not preinstalled - installing via Chocolatey..."
+            choco install innosetup -y --no-progress
+            $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          }
+          Write-Host "Using ISCC: $iscc"
+          & $iscc "deploy/installer/setup.iss"
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed" }
+          $setup = Get-Item "deploy/installer/Output/MT5Copier-Setup.exe"
+          Write-Host ("Installer size: {0:N0} bytes" -f $setup.Length)
+
+      - name: Upload installer + portable ZIP to GitHub Release Assets
         if: github.event_name == 'push' || inputs.release_tag != ''
         uses: softprops/action-gh-release@v2
         with:
-          files: MT5Copier-Windows-x64.zip
+          files: |
+            deploy/installer/Output/MT5Copier-Setup.exe
+            MT5Copier-Windows-x64.zip
           tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
           fail_on_unmatched_files: true

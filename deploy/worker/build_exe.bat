@@ -7,7 +7,7 @@ cd /d "%~dp0"
 python -m pip install --upgrade pyinstaller || goto :err
 python -m PyInstaller --noconfirm --clean copier_engine.spec || goto :err
 echo.
-echo BUILD OK: dist\MT5CopierEngine\MT5CopierEngine.exe
+echo BUILD OK: dist\MT5CopierEngine.exe  (single file, dashboard embedded)
 echo Next: run installer\build_installer.bat or build_portable.bat
 exit /b 0
 :err

@@ -31,16 +31,20 @@ import os
 import sqlite3
 import sys
 import time
+import traceback
 import urllib.parse
 from pathlib import Path
 
 if getattr(sys, "frozen", False):
-    # PyInstaller onedir: keep db/ and ui/ next to the EXE, not inside _internal/
+    # PyInstaller ONEFILE: writable data (db/) lives next to the EXE itself,
+    # while the dashboard UI is embedded inside the binary (extracted to
+    # _MEIPASS at runtime). COPIER_UI still overrides both cases.
     BASE = Path(sys.executable).resolve().parent
+    UI_DIR = Path(os.environ.get("COPIER_UI", Path(getattr(sys, "_MEIPASS", BASE)) / "ui"))
 else:
     BASE = Path(__file__).resolve().parent
+    UI_DIR = Path(os.environ.get("COPIER_UI", BASE / "ui"))
 DB_PATH = Path(os.environ.get("COPIER_DB", BASE / "db" / "mt5copier.db"))
-UI_DIR = Path(os.environ.get("COPIER_UI", BASE / "ui"))
 TCP_HOST = "127.0.0.1"
 TCP_PORT = int(os.environ.get("COPIER_TCP_PORT", "8777"))
 HTTP_HOST = "127.0.0.1"
@@ -1438,3 +1442,25 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         log("warn", "engine", "Shutting down (Ctrl+C)")
+    except Exception:
+        # Keep the console open on a Windows double-click so the error is
+        # actually visible, and persist the traceback next to the EXE.
+        tb = traceback.format_exc()
+        try:
+            log("error", "engine", f"Fatal error: {tb.strip().splitlines()[-1]}")
+        except Exception:
+            pass
+        try:
+            err_dir = DB_PATH.parent
+            err_dir.mkdir(parents=True, exist_ok=True)
+            (err_dir / "engine-error.log").write_text(tb, encoding="utf-8")
+        except Exception:
+            pass
+        print("\n" + "=" * 62)
+        print("FATAL ERROR - full traceback saved to: db\\engine-error.log")
+        print(tb)
+        print("=" * 62)
+        try:
+            input("\nPress Enter to exit...")
+        except Exception:
+            pass

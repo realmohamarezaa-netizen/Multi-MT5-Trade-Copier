@@ -64,3 +64,11 @@ db/*.db-journal
 /tests
 # allow the env example
 !.env.example
+
+# ---- Windows packaging build artifacts ----
+deploy/worker/build/
+deploy/worker/dist/
+deploy/installer/Output/
+# python bytecode
+__pycache__/
+*.pyc
