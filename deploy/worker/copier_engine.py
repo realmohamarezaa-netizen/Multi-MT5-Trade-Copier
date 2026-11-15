@@ -2686,7 +2686,7 @@ async def api_terminals_patch(req):
     return jbody({"error": "not found"}, 404)
 
 
-async def api_terminal_patch(tid, req):
+async def api_terminal_patch(req, tid):
     body = req["json"]
     action = body.get("action")
     value = body.get("value")
