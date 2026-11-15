@@ -37,6 +37,7 @@ import { cn } from "@/lib/utils";
 
 import type { SnapshotDTO } from "@/lib/types";
 import { apiPost, errorMessage } from "@/components/copier/api";
+import { PageSkeleton } from "@/components/copier/common";
 import { LiveClock, faCount } from "@/components/copier/format";
 import { usePolling } from "@/components/copier/use-polling";
 import { DashboardView } from "@/components/copier/dashboard-view";
@@ -290,9 +291,7 @@ export default function Home() {
 
         <main className="min-w-0 flex-1 p-4 sm:p-6">
           {loading && !data ? (
-            <div className="flex min-h-40 items-center justify-center text-sm text-zinc-500">
-              در حال اتصال به موتور...
-            </div>
+            <PageSkeleton cards={6} />
           ) : (
             <>
               {tab === "dashboard" ? <DashboardView /> : null}
@@ -315,11 +314,10 @@ export default function Home() {
       <footer className="mt-auto border-t border-zinc-800 bg-zinc-950">
         <div className="mx-auto flex w-full max-w-[1600px] flex-col items-center justify-between gap-1.5 px-4 py-4 text-center text-[11px] text-zinc-600 sm:flex-row">
           <span>
-            نسخه ۱.۰.۰ — تمام داده‌ها به‌صورت محلی ذخیره می‌شوند؛ هیچ اطلاعاتی به سرور خارجی ارسال
-            نمی‌شود
+            نسخه ۲.۰.۰ — برنامه دسکتاپی، کاملاً محلی؛ بدون اکسپرت (EA) و بدون سرور ابری
           </span>
           <span dir="ltr" className="font-mono">
-            multi-mt5-copier · build v1.0.0-local
+            multi-mt5-copier · build v2.0.0-local
           </span>
         </div>
       </footer>

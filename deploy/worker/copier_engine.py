@@ -38,12 +38,16 @@ import asyncio
 import json
 import os
 import random
+import secrets
 import socket
 import sqlite3
+import subprocess
 import sys
+import threading
 import time
 import traceback
 import urllib.parse
+import urllib.request
 import webbrowser
 import zlib
 from pathlib import Path
@@ -205,6 +209,20 @@ def migrate_schema():
 
 migrate_schema()
 
+LOG_FILE = DB_PATH.parent / "engine.log"
+
+
+def _append_engine_log(line: str) -> None:
+    """Mirror logs to db\\engine.log (the only visible log in windowed builds)."""
+    try:
+        if LOG_FILE.exists() and LOG_FILE.stat().st_size > 1_500_000:
+            data = LOG_FILE.read_text(encoding="utf-8", errors="replace")[-300_000:]
+            LOG_FILE.write_text(data, encoding="utf-8")
+        with LOG_FILE.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+
 
 def log(level: str, category: str, message: str, terminal_id="", terminal_name="", details=""):
     try:
@@ -212,6 +230,10 @@ def log(level: str, category: str, message: str, terminal_id="", terminal_name="
             "INSERT INTO logs (ts, level, category, terminal_id, terminal_name, message, details) VALUES (?,?,?,?,?,?,?)",
             (now_ms(), level, category, terminal_id, terminal_name, message, details),
         )
+    except Exception:
+        pass
+    try:
+        _append_engine_log(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {level.upper():7} {category:10} {message}" + (f" | {details}" if details else ""))
     except Exception:
         pass
     try:
@@ -349,33 +371,135 @@ def emit_json(obj: dict) -> None:
         raise SystemExit(0)
 
 
+class WorkerFatal(Exception):
+    """Raised by a bridge worker when it cannot start at all."""
+
+
+WORKER_NOTIFY = None  # set by the active transport (socket); None = stdio
+
+
+def worker_notify(obj: dict) -> None:
+    """Send an unsolicited worker message (status/fatal) over the active transport."""
+    fn = WORKER_NOTIFY
+    if fn:
+        try:
+            fn(obj)
+            return
+        except Exception:
+            pass
+    emit_json(obj)
+
+
+def _serve_stdio(dispatch, make_ready) -> int:
+    """Serve the engine over stdin/stdout (dev/test fallback transport)."""
+    global WORKER_NOTIFY
+    WORKER_NOTIFY = None
+    try:
+        ready = make_ready()
+    except WorkerFatal as e:
+        emit_json({"type": "fatal", "error": str(e)})
+        return 3
+    emit_json({"type": "ready", **ready})
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+        except Exception:
+            continue
+        try:
+            res = dispatch(req)
+        except SystemExit:
+            raise
+        except Exception as e:  # keep the worker alive on single-command errors
+            res = {"ok": False, "code": "worker_exception", "error": f"{type(e).__name__}: {e}"}
+        res.setdefault("type", "ack")
+        res["eventKey"] = req.get("eventKey", "")
+        emit_json(res)
+    return 0
+
+
+def _serve_socket(cfg, dispatch, make_ready) -> int:
+    """Serve the engine over loopback TCP (newline-delimited JSON).
+
+    A console-free (windowed) PyInstaller build has no usable stdio handles,
+    so the child process connects BACK to the engine's IPC listener,
+    authenticates with a one-time token and speaks exactly the same
+    newline-JSON protocol as the stdio transport.
+    """
+    global WORKER_NOTIFY
+    import socket as _sock
+    port = int(cfg.get("ipcPort") or 0)
+    token = str(cfg.get("ipcToken") or "")
+    if port <= 0:
+        return _serve_stdio(dispatch, make_ready)
+    sock = None
+    deadline = time.time() + 30
+    last_err = ""
+    while sock is None:
+        try:
+            sock = _sock.create_connection(("127.0.0.1", port), timeout=10)
+        except OSError as e:
+            last_err = str(e)
+            if time.time() > deadline:
+                emit_json({"type": "fatal", "error": f"cannot reach engine IPC listener: {last_err}"})
+                return 3
+            time.sleep(0.25)
+
+    def _send(obj: dict) -> None:
+        sock.sendall(json.dumps(obj, ensure_ascii=True, default=str).encode() + b"\n")
+
+    WORKER_NOTIFY = _send
+    try:
+        try:
+            ready = make_ready()
+        except WorkerFatal as e:
+            _send({"type": "fatal", "error": str(e)})
+            return 3
+        _send({"type": "ready", "token": token, **ready})
+        buf = b""
+        while True:
+            try:
+                chunk = sock.recv(65536)
+            except OSError:
+                return 0
+            if not chunk:
+                return 0  # engine closed the connection -> exit quietly
+            buf += chunk
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    req = json.loads(line.decode("utf-8", "replace"))
+                except Exception:
+                    continue
+                try:
+                    res = dispatch(req)
+                except SystemExit:
+                    raise
+                except Exception as e:
+                    res = {"ok": False, "code": "worker_exception", "error": f"{type(e).__name__}: {e}"}
+                res.setdefault("type", "ack")
+                res["eventKey"] = req.get("eventKey", "")
+                _send(res)
+    finally:
+        WORKER_NOTIFY = None
+        try:
+            sock.close()
+        except Exception:
+            pass
+    return 0
+
+
 class BaseBridgeWorker:
     """Shared plumbing for the real MT5 worker and the simulated worker."""
 
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.magic = int(cfg.get("magic") or 0)
-
-    def serve(self, dispatch, ready_msg: dict) -> int:
-        emit_json({"type": "ready", **ready_msg})
-        for line in sys.stdin:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                req = json.loads(line)
-            except Exception:
-                continue
-            try:
-                res = dispatch(req)
-            except SystemExit:
-                raise
-            except Exception as e:  # keep the worker alive on single-command errors
-                res = {"ok": False, "code": "worker_exception", "error": f"{type(e).__name__}: {e}"}
-            res.setdefault("type", "ack")
-            res["eventKey"] = req.get("eventKey", "")
-            emit_json(res)
-        return 0
 
     def _norm_pos(self, ticket, symbol, side, volume, open_price, current_price, sl, tp, profit, open_time, comment):
         return {
@@ -533,7 +657,7 @@ class Mt5Worker(BaseBridgeWorker):
 
     def _dead_check(self, payload):
         if not self.alive():
-            emit_json({"type": "status", "status": "reconnecting", "error": self._err()})
+            worker_notify({"type": "status", "status": "reconnecting", "error": self._err()})
             raise SystemExit(1)
         return payload
 
@@ -726,7 +850,7 @@ class Mt5Worker(BaseBridgeWorker):
             return self.do_cancel(req)
         return {"ok": False, "code": "unknown_kind", "error": f"unknown command {kind}"}
 
-    def run(self) -> int:
+    def make_ready(self) -> dict:
         ok = False
         for _ in range(3):
             if self.init_terminal():
@@ -734,19 +858,17 @@ class Mt5Worker(BaseBridgeWorker):
                 break
             time.sleep(2.0)
         if not ok:
-            emit_json({"type": "fatal", "error": f"mt5.initialize failed: {self._err()}"})
-            return 3
+            raise WorkerFatal(f"mt5.initialize failed: {self._err()}")
         acc = self.account_msg()
         if not acc:
-            emit_json({"type": "fatal", "error": f"terminal started but account is not ready: {self._err()}"})
-            return 3
+            raise WorkerFatal(f"terminal started but account is not ready: {self._err()}")
+        return acc
+
+    def on_exit(self) -> None:
         try:
-            return self.serve(self.dispatch, acc)
-        finally:
-            try:
-                self.mt5.shutdown()
-            except Exception:
-                pass
+            self.mt5.shutdown()
+        except Exception:
+            pass
 
 
 class MockTerminal(BaseBridgeWorker):
@@ -1063,8 +1185,8 @@ class MockTerminal(BaseBridgeWorker):
             return self.do_cancel(req)
         return {"ok": False, "code": "unknown_kind", "error": f"unknown command {kind}"}
 
-    def run(self) -> int:
-        return self.serve(self.dispatch, self.account_msg())
+    def make_ready(self) -> dict:
+        return self.account_msg()
 
 
 def run_bridge_worker(cfg_path: str) -> int:
@@ -1078,12 +1200,8 @@ def run_bridge_worker(cfg_path: str) -> int:
     except Exception as e:
         print(f"bad bridge config: {e}", file=sys.stderr)
         return 2
-    if cfg.get("mock"):
-        return MockTerminal(cfg).run()
     try:
-        return Mt5Worker(cfg).run()
-    except SystemExit:
-        raise
+        worker = MockTerminal(cfg) if cfg.get("mock") else Mt5Worker(cfg)
     except ImportError as e:
         emit_json({"type": "fatal", "error": f"MetaTrader5 Python package unavailable: {e}"})
         return 3
@@ -1091,6 +1209,159 @@ def run_bridge_worker(cfg_path: str) -> int:
         print(f"bridge worker crashed: {type(e).__name__}: {e}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
         return 2
+    try:
+        if cfg.get("ipcPort"):
+            return _serve_socket(cfg, worker.dispatch, worker.make_ready)
+        return _serve_stdio(worker.dispatch, worker.make_ready)
+    finally:
+        on_exit = getattr(worker, "on_exit", None)
+        if on_exit:
+            try:
+                on_exit()
+            except Exception:
+                pass
+
+
+# ============================================================================
+# AUTOMATIC MT5 TERMINAL DISCOVERY (Windows, fully local)
+# ============================================================================
+# The engine scans the machine for installed MetaTrader 5 terminals and
+# registers every new terminal64.exe automatically, so the user does not
+# have to type any path. Sources (all local, no network):
+#   1) HKCU\Software\MetaQuotes\Terminal\<hash>\InstallPath  (official)
+#   2) %APPDATA%\MetaQuotes\Terminal\<hash>\origin.txt
+#   3) common install roots (Program Files / %LOCALAPPDATA%\Programs)
+
+
+def _normalize_exe(p: str) -> str:
+    try:
+        return os.path.normcase(os.path.normpath(os.path.abspath(p)))
+    except Exception:
+        return (p or "").strip().lower()
+
+
+def _mt5_candidate_paths() -> list:
+    """Return [{exePath, suggestedName}] for every installed MT5 terminal."""
+    found = {}
+    if sys.platform != "win32":
+        return []
+
+    def add(path: str):
+        try:
+            path = os.path.normpath(os.path.abspath(path))
+        except Exception:
+            return
+        if not path.lower().endswith("terminal64.exe") or not os.path.isfile(path):
+            return
+        folder = os.path.basename(os.path.dirname(path)) or "MetaTrader 5"
+        found.setdefault(_normalize_exe(path), {"exePath": path, "suggestedName": folder})
+
+    # 1) official registry entries written by the MetaTrader 5 installer
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\MetaQuotes\Terminal") as root:
+            idx = 0
+            while True:
+                try:
+                    sub = winreg.EnumKey(root, idx)
+                    idx += 1
+                except OSError:
+                    break
+                try:
+                    with winreg.OpenKey(root, sub) as k:
+                        val, _ = winreg.QueryValueEx(k, "InstallPath")
+                        if val:
+                            add(os.path.join(str(val), "terminal64.exe"))
+                except OSError:
+                    continue
+    except Exception:
+        pass
+
+    # 2) data-folder origin.txt (written for every non-portable install)
+    try:
+        appdata = os.environ.get("APPDATA") or ""
+        base = os.path.join(appdata, "MetaQuotes", "Terminal")
+        if os.path.isdir(base):
+            for name in os.listdir(base):
+                origin = os.path.join(base, name, "origin.txt")
+                if os.path.isfile(origin):
+                    try:
+                        txt = (origin.read_text(encoding="utf-8", errors="replace")
+                               if hasattr(origin, "read_text") else open(origin, encoding="utf-8", errors="replace").read())
+                        val = txt.strip().splitlines()[0].strip() if txt.strip() else ""
+                        if val:
+                            add(os.path.join(val, "terminal64.exe"))
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+    # 3) well-known install roots (covers portable / custom installs too)
+    import glob
+    patterns = [
+        r"C:\\Program Files\\*\\terminal64.exe",
+        r"C:\\Program Files (x86)\\*\\terminal64.exe",
+    ]
+    local = os.environ.get("LOCALAPPDATA") or ""
+    if local:
+        patterns.append(os.path.join(local, "Programs", "*", "terminal64.exe"))
+    desktop = os.environ.get("USERPROFILE") or ""
+    if desktop:
+        patterns.append(os.path.join(desktop, "Desktop", "*", "terminal64.exe"))
+    for pat in patterns:
+        try:
+            for hit in glob.glob(pat):
+                add(hit)
+        except Exception:
+            pass
+
+    return list(found.values())
+
+
+def auto_register_terminals(log_result: bool = True) -> dict:
+    """Discover installed MT5 terminals and add the unknown ones to the DB.
+
+    Every newly found terminal is registered enabled and connected right
+    away: the bridge worker will start/attach its terminal64.exe through
+    the official MetaTrader5 API (no EA, no login needed if the terminal
+    already has a saved account).
+    """
+    demo = os.environ.get("COPIER_DEMO", "").strip().lower() in {"1", "true", "yes"}
+    cands = [] if demo else _mt5_candidate_paths()
+    existing = {
+        _normalize_exe(r["exe_path"])
+        for r in DB.q("SELECT exe_path FROM terminals") if r["exe_path"]
+    }
+    added = []
+    for c in cands:
+        np = _normalize_exe(c["exePath"])
+        if np in existing:
+            continue
+        name = c["suggestedName"]
+        base, n = name, 2
+        while DB.one("SELECT id FROM terminals WHERE name=?", (name,)):
+            name = f"{base} ({n})"
+            n += 1
+        tid = f"t{now_ms()}{random.randrange(100, 999)}"
+        DB.x(
+            "INSERT INTO terminals (id, name, exe_path, enabled, status) VALUES (?,?,?,1,'connecting')",
+            (tid, name, c["exePath"]),
+        )
+        ensure_slave_settings(tid)
+        added.append({"id": tid, "name": name, "exePath": c["exePath"]})
+        log("success", "connection", f"MT5 terminal discovered automatically: {name}", tid, name, c["exePath"])
+        ENGINE.start_terminal_tasks(tid)
+    if log_result:
+        if added:
+            log("success", "connection", f"Auto-scan: {len(added)} new MT5 terminal(s) registered and connecting")
+        elif cands:
+            log("info", "connection", f"Auto-scan: {len(cands)} installed MT5 terminal(s), all already registered")
+        else:
+            if demo:
+                log("info", "connection", "Auto-scan skipped in demo mode")
+            else:
+                log("info", "connection", "Auto-scan: no MetaTrader 5 installation found (add one manually in Connections)")
+    return {"found": [c["exePath"] for c in cands], "added": added, "demo": demo}
 
 
 # ============================================================================
@@ -1098,12 +1369,18 @@ def run_bridge_worker(cfg_path: str) -> int:
 # ============================================================================
 
 class Bridge:
-    """Async wrapper around one `--bridge` subprocess (real or mock)."""
+    """Async wrapper around one `--bridge` subprocess (real or mock).
+
+    Transport: loopback TCP (127.0.0.1) with newline-delimited JSON and a
+    one-time auth token. A TCP channel (instead of stdin/stdout pipes)
+    works identically in windowed, console-free PyInstaller builds where
+    the child process has no stdio handles.
+    """
 
     def __init__(self, engine, tid: str, cfg: dict):
         self.engine = engine
         self.terminal_id = tid
-        self.cfg = cfg
+        self.cfg = dict(cfg)
         self.magic = int(cfg.get("magic") or 0)
         self.account = None
         self.specs = {}
@@ -1112,16 +1389,27 @@ class Bridge:
         self.fatal_error = ""
         self.last_error = ""
         self.pending_acks = {}
-        self.reader_task = None
         self.err_path = DB_PATH.parent / f"bridge-{tid}.err"
         self.alive = False
+        self.ipc_token = secrets.token_hex(16)
+        self.ipc_server = None
+        self.writer = None
 
     async def spawn(self) -> bool:
         self.ready = False
         self.fatal_error = ""
+        try:
+            self.ipc_server = await asyncio.start_server(self._ipc_handler, "127.0.0.1", 0)
+            port = self.ipc_server.sockets[0].getsockname()[1]
+        except Exception as e:
+            self.last_error = f"cannot open bridge IPC listener: {e}"
+            return False
+        cfg = dict(self.cfg)
+        cfg["ipcPort"] = int(port)
+        cfg["ipcToken"] = self.ipc_token
         cfg_path = DB_PATH.parent / f"bridge-cfg-{self.terminal_id}.json"
         try:
-            cfg_path.write_text(json.dumps(self.cfg), encoding="utf-8")
+            cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
         except Exception as e:
             self.last_error = f"cannot write bridge config: {e}"
             return False
@@ -1129,25 +1417,44 @@ class Bridge:
             argv = [sys.executable, "--bridge", str(cfg_path)]
         else:
             argv = [sys.executable, str(Path(__file__).resolve()), "--bridge", str(cfg_path)]
+        extra = {}
+        if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
+            extra["creationflags"] = subprocess.CREATE_NO_WINDOW
         try:
             err_fp = open(self.err_path, "ab")
             self.proc = await asyncio.create_subprocess_exec(
                 *argv,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL,
                 stderr=err_fp,
+                **extra,
             )
         except Exception as e:
             self.last_error = f"spawn failed: {e}"
             return False
         self.alive = True
-        self.reader_task = asyncio.ensure_future(self._read())
         return True
 
-    async def _read(self):
+    async def _ipc_handler(self, reader, writer):
+        connected = False
         try:
+            first = await asyncio.wait_for(reader.readline(), timeout=BRIDGE_READY_TIMEOUT)
+            if not first:
+                writer.close()
+                return
+            try:
+                hello = json.loads(first.decode("utf-8", "replace"))
+            except Exception:
+                writer.close()
+                return
+            if str(hello.get("token") or "") != self.ipc_token:
+                writer.close()  # a foreign process knocked - reject
+                return
+            self.writer = writer
+            connected = True
+            await self.handle(hello)
             while True:
-                line = await self.proc.stdout.readline()
+                line = await reader.readline()
                 if not line:
                     break
                 try:
@@ -1158,22 +1465,35 @@ class Bridge:
                     await self.handle(msg)
                 except Exception as e:
                     log("error", "engine", f"bridge message handling failed: {e}", self.terminal_id)
+        except (asyncio.TimeoutError, asyncio.IncompleteReadError):
+            pass
         except Exception:
             pass
         finally:
-            self.alive = False
-            self.ready = False
-            for fut in self.pending_acks.values():
-                if not fut.done():
-                    fut.set_result({"ok": False, "code": "bridge_dead", "error": "bridge process exited", "at": now_ms()})
-            self.pending_acks.clear()
-            self.engine.bridge_exited(self.terminal_id, self)
+            if connected:
+                self.alive = False
+                self.ready = False
+                for fut in self.pending_acks.values():
+                    if not fut.done():
+                        fut.set_result({"ok": False, "code": "bridge_dead", "error": "bridge process exited", "at": now_ms()})
+                self.pending_acks.clear()
+                self.engine.bridge_exited(self.terminal_id, self)
+            try:
+                writer.close()
+            except Exception:
+                pass
+            if self.ipc_server:
+                try:
+                    self.ipc_server.close()
+                except Exception:
+                    pass
 
     def send(self, obj: dict) -> bool:
-        if not (self.proc and self.proc.stdin):
+        w = self.writer
+        if w is None:
             return False
         try:
-            self.proc.stdin.write((json.dumps(obj) + "\n").encode())
+            w.write((json.dumps(obj) + "\n").encode())
             return True
         except Exception:
             self.alive = False
@@ -1227,10 +1547,15 @@ class Bridge:
         self.alive = False
         self.ready = False
         try:
-            if self.proc and self.proc.stdin:
-                self.proc.stdin.close()
+            if self.writer:
+                self.writer.close()
         except Exception:
             pass
+        if self.ipc_server:
+            try:
+                self.ipc_server.close()
+            except Exception:
+                pass
         if self.proc:
             try:
                 await asyncio.wait_for(self.proc.wait(), timeout=4)
@@ -1239,8 +1564,6 @@ class Bridge:
                     self.proc.kill()
                 except Exception:
                     pass
-        if self.reader_task:
-            self.reader_task.cancel()
 
 
 # ----------------------------------------------------------------------------
@@ -2348,6 +2671,15 @@ async def api_terminals_post(req):
     return jbody({"id": tid}, 201)
 
 
+@route("POST", "/api/terminals/scan")
+async def api_terminals_scan(req):
+    """Rescan the machine for installed MT5 terminals and connect the new ones."""
+    try:
+        return jbody(auto_register_terminals(log_result=True))
+    except Exception as e:
+        return jbody({"error": f"scan failed: {e}"}, 500)
+
+
 @route("PATCH", "/api/terminals")
 async def api_terminals_patch(req):
     # /api/terminals/{id} handled below via path splitting in http handler
@@ -2598,8 +2930,16 @@ def dashboard_url() -> str:
     return f"http://{HTTP_HOST}:{HTTP_PORT}"
 
 
+# Lifecycle signals used by the desktop-app launcher (GUI mode).
+READY_SERVER = threading.Event()   # HTTP dashboard/API listening
+READY_SCAN = threading.Event()     # terminal auto-scan finished
+ENGINE_FATAL = {"message": ""}
+ENGINE_LOOP_REF = None             # engine asyncio loop (for cross-thread shutdown)
+HTTP_SERVER_REF = None             # asyncio server object
+
+
 def browser_disabled() -> bool:
-    if "--no-browser" in sys.argv:
+    if "--no-browser" in sys.argv or "--console" in sys.argv or "--headless" in sys.argv:
         return True
     return os.environ.get("COPIER_NO_BROWSER", "").strip().lower() in {"1", "true", "yes"}
 
@@ -2652,7 +2992,14 @@ def print_ready_banner(dashboard_opened: bool) -> None:
     print(line + "\n", flush=True)
 
 
-async def main():
+async def engine_main(console_mode: bool = False):
+    """Engine core: DB + terminal bridges + dashboard HTTP/API.
+
+    console_mode=True additionally opens the browser and prints the friendly
+    console banner (classic behaviour). In desktop-app mode the GUI launcher
+    drives everything through the READY_* events instead.
+    """
+    global ENGINE_LOOP_REF, HTTP_SERVER_REF
     settings = get_settings()
     DB.x("UPDATE app_settings SET engine_running=1, booted_at=? WHERE id='singleton'", (now_ms(),))
     for t in DB.q("SELECT id, status FROM terminals"):
@@ -2662,20 +3009,192 @@ async def main():
     log("info", "engine", "Mode: local MT5 bridges (no EA / no MQL5 / no cloud) - master poll "
         f"{MASTER_POLL_MS}ms, slave poll {SLAVE_POLL_MS}ms")
     http = await asyncio.start_server(http_handler, HTTP_HOST, HTTP_PORT)
+    ENGINE_LOOP_REF = asyncio.get_running_loop()
+    HTTP_SERVER_REF = http
     log("success", "engine", f"Dashboard/API on http://{HTTP_HOST}:{HTTP_PORT}")
+    READY_SERVER.set()
     if os.environ.get("COPIER_DEMO", "").strip().lower() in {"1", "true", "yes"}:
         if not DB.q("SELECT id FROM terminals LIMIT 1"):
             seed_demo_terminals()
+    try:
+        auto_register_terminals(log_result=True)  # Windows: find installed terminals
+    except Exception as e:
+        log("error", "connection", f"terminal auto-scan failed: {e}")
+    READY_SCAN.set()
     for t in DB.q("SELECT id FROM terminals"):
         ENGINE.start_terminal_tasks(t["id"])
     await ENGINE.reconcile_all(policy_override=settings["sync_on_start"])
-    opened = open_dashboard()
-    print_ready_banner(opened)
+    if console_mode:
+        opened = open_dashboard()
+        print_ready_banner(opened)
     try:
         async with http:
             await http.serve_forever()
     finally:
         await ENGINE.shutdown_bridges()
+
+
+# ============================================================================
+# DESKTOP APP MODE (default on Windows - no browser needed)
+# ============================================================================
+
+SPLASH_HTML = r"""<!doctype html>
+<html dir="rtl" lang="fa"><head><meta charset="utf-8">
+<title>Multi-MT5 Trade Copier</title>
+<style>
+  html,body{margin:0;height:100%;background:#09090b;font-family:'Segoe UI',Tahoma,Arial,sans-serif;overflow:hidden;user-select:none}
+  .wrap{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:16px;padding:26px;color:#e4e4e7}
+  .logo{width:54px;height:54px;border-radius:14px;border:1px solid rgba(245,158,11,.45);background:rgba(245,158,11,.12);display:flex;align-items:center;justify-content:center}
+  .logo svg{width:26px;height:26px;fill:#f59e0b}
+  h1{font-size:15px;margin:0;font-weight:700;color:#fafafa}
+  .sk{width:100%;max-width:290px;display:flex;flex-direction:column;gap:9px;margin-top:2px}
+  .bar{height:11px;border-radius:6px;background:linear-gradient(90deg,#18181b 25%,#2d2d31 37%,#18181b 63%);background-size:400% 100%;animation:sh 1.25s ease infinite}
+  .bar:nth-child(1){width:100%}.bar:nth-child(2){width:80%}.bar:nth-child(3){width:60%}.bar:nth-child(4){width:86%}
+  @keyframes sh{0%{background-position:100% 50%}100%{background-position:0 50%}}
+  .status{display:flex;align-items:center;gap:8px;font-size:12px;color:#a1a1aa;min-height:18px;margin-top:2px}
+  .dot{width:8px;height:8px;border-radius:50%;background:#f59e0b;animation:pu 1s ease infinite;flex:none}
+  @keyframes pu{0%,100%{opacity:.35;transform:scale(.85)}50%{opacity:1;transform:scale(1.15)}}
+  .foot{position:absolute;bottom:9px;inset-inline:0;text-align:center;font-size:10px;color:#52525b}
+</style></head><body>
+<div class="wrap">
+  <div class="logo"><svg viewBox="0 0 24 24"><path d="M9.5 3h5v2.2h-1.4v3.6l4.9 5.4v3.6h1.3V20h-4.6v-2.2h1.1v-2.6l-4.8-5.3-4.8 5.3v2.6h1.1V20H2.7v-2.2H4v-3.6l4.9-5.4V5.2H8.5V3h1z"/></svg></div>
+  <h1>کوپیر چندترمیناله MT5</h1>
+  <div class="sk"><div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div></div>
+  <div class="status"><span class="dot"></span><span id="st">در حال راه‌اندازی...</span></div>
+</div>
+<div class="foot">نسخه ۲.۰.۰ · کاملاً محلی · بدون اکسپرت (EA) · بدون سرور ابری</div>
+<script>window.__setStatus=function(t){var e=document.getElementById('st');if(e)e.textContent=t;};</script>
+</body></html>"""
+
+
+def gui_available() -> bool:
+    """Desktop-app (native window) mode is the default on Windows."""
+    if sys.platform != "win32":
+        return False
+    if "--browser" in sys.argv or "--console" in sys.argv:
+        return False
+    if browser_disabled():  # --no-browser / --headless / COPIER_NO_BROWSER=1
+        return False
+    try:
+        import webview  # noqa: F401  (pywebview - WebView2 based native window)
+        return True
+    except Exception:
+        return False
+
+
+def _api_alive(timeout=1.0) -> bool:
+    try:
+        with urllib.request.urlopen(f"http://{HTTP_HOST}:{HTTP_PORT}/api/state", timeout=timeout) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+def _engine_thread_main():
+    """Run the whole engine inside a background thread for GUI mode."""
+    try:
+        asyncio.run(engine_main(console_mode=False))
+    except Exception:
+        tb = traceback.format_exc()
+        ENGINE_FATAL["message"] = (tb.strip().splitlines() or ["unknown error"])[-1]
+        try:
+            err_dir = DB_PATH.parent
+            err_dir.mkdir(parents=True, exist_ok=True)
+            (err_dir / "engine-error.log").write_text(tb, encoding="utf-8")
+        except Exception:
+            pass
+        log("error", "engine", f"Fatal error: {ENGINE_FATAL['message']}")
+
+
+def _js_set_status(window, text: str) -> None:
+    try:
+        window.evaluate_js(f"window.__setStatus({json.dumps(text, ensure_ascii=False)})")
+    except Exception:
+        pass
+
+
+def _stop_engine_thread(thread) -> None:
+    """Gracefully stop the engine after the app window is closed."""
+    loop = ENGINE_LOOP_REF
+    try:
+        if loop and loop.is_running():
+            asyncio.run_coroutine_threadsafe(ENGINE.shutdown_bridges(), loop)
+            srv = HTTP_SERVER_REF
+            if srv:
+                loop.call_soon_threadsafe(srv.close)
+    except Exception:
+        pass
+    try:
+        thread.join(timeout=3)
+    except Exception:
+        pass
+
+
+def launch_desktop_app() -> bool:
+    """Splash skeleton -> dashboard window, engine in a background thread.
+
+    Returns True when the GUI ran and was closed by the user (process exits).
+    Returns False when pywebview is unavailable (caller falls back to console).
+    """
+    try:
+        import webview
+    except Exception:
+        return False
+    log("info", "engine", "Desktop app mode: native window (no browser)")
+    engine_thread = threading.Thread(target=_engine_thread_main, daemon=True)
+    engine_thread.start()
+
+    splash = webview.create_window(
+        "Multi-MT5 Trade Copier", html=SPLASH_HTML, width=460, height=340,
+        resizable=False, on_top=True, background_color="#09090b",
+    )
+
+    def updater():
+        try:
+            _js_set_status(splash, "راه‌اندازی موتور کپی...")
+            if not READY_SERVER.wait(60):
+                if ENGINE_FATAL["message"]:
+                    _js_set_status(splash, "خطا در راه‌اندازی - جزئیات در db\\engine-error.log")
+                else:
+                    _js_set_status(splash, "در حال راه‌اندازی موتور... (کمی صبر کنید)")
+                return
+            _js_set_status(splash, "شناسایی ترمینال‌های متاتریدر ۵ نصب‌شده...")
+            READY_SCAN.wait(60)
+            _js_set_status(splash, "اتصال به ترمینال‌ها...")
+            deadline = time.time() + 45
+            while time.time() < deadline and not _api_alive():
+                if ENGINE_FATAL["message"]:
+                    _js_set_status(splash, "خطا در راه‌اندازی - جزئیات در db\\engine-error.log")
+                    return
+                time.sleep(0.3)
+            _js_set_status(splash, "بارگذاری داشبورد...")
+            time.sleep(0.4)
+            webview.create_window(
+                "Multi-MT5 Trade Copier", dashboard_url(), width=1440, height=920,
+                min_size=(1024, 680), background_color="#09090b",
+            )
+            time.sleep(0.8)  # give the main window a moment to paint
+            try:
+                splash.destroy()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    threading.Thread(target=updater, daemon=True).start()
+    try:
+        webview.start()  # blocks until all windows are closed
+    except Exception as e:
+        log("error", "engine", f"native window failed ({e}) - falling back to browser")
+        open_dashboard()
+        try:
+            while engine_thread.is_alive():
+                time.sleep(1)
+        except Exception:
+            pass
+        return True
+    _stop_engine_thread(engine_thread)
+    return True
 
 
 if __name__ == "__main__":
@@ -2692,10 +3211,22 @@ if __name__ == "__main__":
         except Exception:
             traceback.print_exc(file=sys.stderr)
             sys.exit(2)
+
     # Friendly double-click guard: when the engine is already running, a
-    # second launch just re-opens the dashboard instead of a port error.
+    # second launch opens the app window (or the browser) on the LIVE
+    # dashboard instead of failing with a port error.
     if already_running():
-        print("Engine is already running - dashboard: " + dashboard_url())
+        url = dashboard_url()
+        if gui_available():
+            try:
+                import webview
+                webview.create_window("Multi-MT5 Trade Copier", url, width=1440, height=920,
+                                      min_size=(1024, 680), background_color="#09090b")
+                webview.start()
+                sys.exit(0)
+            except Exception:
+                pass
+        print("Engine is already running - dashboard: " + url)
         if not browser_disabled():
             open_dashboard()
         try:
@@ -2703,8 +3234,20 @@ if __name__ == "__main__":
         except Exception:
             pass
         sys.exit(0)
+
+    # Desktop-app mode (default on Windows): splash skeleton + dashboard
+    # window, engine in the background. No browser, no black console.
+    if gui_available():
+        try:
+            if launch_desktop_app():
+                sys.exit(0)
+        except Exception:
+            traceback.print_exc(file=sys.stderr)
+
+    # Classic console fallback (Linux/dev, --browser, --console, --headless,
+    # or when pywebview is unavailable): engine console + optional browser.
     try:
-        asyncio.run(main())
+        asyncio.run(engine_main(console_mode=True))
     except KeyboardInterrupt:
         log("warn", "engine", "Shutting down (Ctrl+C)")
     except Exception:

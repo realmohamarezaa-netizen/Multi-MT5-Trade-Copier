@@ -3,7 +3,8 @@ rem ============================================================
 rem  Multi-MT5 Trade Copier - EASY INSTALL (no admin needed)
 rem  - Installs to %LOCALAPPDATA%\MT5Copier (NOT Program Files)
 rem  - Creates Desktop + Start Menu shortcuts
-rem  - Starts the engine; the dashboard opens in your browser
+rem  - Starts the DESKTOP APP; the dashboard window opens by itself
+rem    (native window with a loading skeleton - no browser needed)
 rem  Requirements: nothing (no admin, no Python, no internet)
 rem ============================================================
 setlocal EnableExtensions
@@ -54,12 +55,12 @@ echo   Autostart: ON
 :skipautostart
 
 echo.
-echo   Starting MT5 Copier...
+echo   Starting MT5 Copier (desktop app window opens automatically)...
 start "" "%DEST%\MT5CopierEngine.exe"
 echo.
 echo  ============================================
-echo   DONE! The dashboard opens in your browser:
-echo     http://127.0.0.1:8321
+echo   DONE! The MT5 Copier desktop window opens by
+echo   itself (first a loading screen, then the app).
 echo   Shortcuts created: Desktop + Start Menu
 echo   Uninstall later: Easy-Uninstall.bat
 echo  ============================================

@@ -35,7 +35,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
-import { Plus, Power, PlugZap, Trash2, Cable } from "lucide-react";
+import { Pencil, Plus, Power, PlugZap, Radar, Trash2, Cable } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import type { SnapshotDTO, TerminalDTO } from "@/lib/types";
@@ -53,6 +53,48 @@ import { Mono, RelativeTime, faCount } from "./format";
 import { usePolling } from "./use-polling";
 
 const EMPTY_FORM = { name: "", broker: "", server: "", exePath: "", login: "", password: "" };
+
+type ScanResult = {
+  found: string[];
+  added: { id: string; name: string; exePath: string }[];
+  demo?: boolean;
+};
+
+function ScanTerminalsButton({ onDone }: { onDone: () => void }) {
+  const [busy, setBusy] = useState(false);
+
+  const scan = async () => {
+    setBusy(true);
+    try {
+      const res = await apiPost<ScanResult>("/api/terminals/scan", {});
+      const n = res?.added?.length ?? 0;
+      if (n > 0) {
+        toast.success(`${faCount(n)} ترمینال جدید شناسایی و در حال اتصال است`);
+      } else if (res?.demo) {
+        toast.info("در حالت نمایشی اسکن غیرفعال است");
+      } else {
+        toast.info("ترمینال جدیدی پیدا نشد — همه ترمینال‌های نصب‌شده قبلاً ثبت شده‌اند");
+      }
+      onDone();
+    } catch (err) {
+      toast.error(errorMessage(err, "اسکن ترمینال‌ها ناموفق بود"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Button
+      variant="outline"
+      onClick={scan}
+      disabled={busy}
+      className="h-11 gap-1.5 border-zinc-700 text-zinc-300 hover:bg-zinc-800 sm:h-9"
+    >
+      <Radar className={cn("size-4 text-emerald-400", busy && "animate-pulse")} />
+      {busy ? "در حال اسکن..." : "اسکن ترمینال‌ها"}
+    </Button>
+  );
+}
 
 function AddTerminalDialog({ onCreated }: { onCreated: () => void }) {
   const [open, setOpen] = useState(false);
@@ -192,6 +234,141 @@ function AddTerminalDialog({ onCreated }: { onCreated: () => void }) {
   );
 }
 
+function EditTerminalDialog({ terminal, onSaved }: { terminal: TerminalDTO; onSaved: () => void }) {
+  const t = terminal;
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [form, setForm] = useState({
+    exePath: t.exePath || "",
+    server: t.server || "",
+    login: "",
+    password: "",
+    portable: false,
+  });
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      await apiPatch(`/api/terminals/${t.id}`, {
+        action: "updateConnection",
+        exePath: form.exePath.trim(),
+        server: form.server.trim(),
+        ...(form.login.trim() ? { login: form.login.trim() } : {}),
+        ...(form.password ? { password: form.password } : {}),
+        portable: form.portable,
+      });
+      toast.success(`تنظیمات اتصال «${t.name}» ذخیره شد — در حال اتصال مجدد...`);
+      setOpen(false);
+      onSaved();
+    } catch (err) {
+      toast.error(errorMessage(err, "ذخیره تنظیمات ناموفق بود"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (next)
+          setForm({ exePath: t.exePath || "", server: t.server || "", login: "", password: "", portable: false });
+      }}
+    >
+      <DialogTrigger asChild>
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label={`ویرایش اتصال ${t.name}`}
+          className="size-11 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 sm:size-9"
+        >
+          <Pencil className="size-4" />
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="border-zinc-800 bg-zinc-900 sm:max-w-md">
+        <DialogHeader className="text-start">
+          <DialogTitle>ویرایش اتصال «{t.name}»</DialogTitle>
+          <DialogDescription>
+            مسیر terminal64.exe و اطلاعات ورود را ویرایش کنید؛ پس از ذخیره، اتصال به‌صورت خودکار برقرار می‌شود.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="flex flex-col gap-4">
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="edit-exe">مسیر نصب (terminal64.exe)</Label>
+            <Input
+              id="edit-exe"
+              dir="ltr"
+              className="text-start font-mono text-xs"
+              placeholder="C:\\Program Files\\MetaTrader 5\\terminal64.exe"
+              value={form.exePath}
+              onChange={(e) => setForm({ ...form, exePath: e.target.value })}
+            />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="edit-server">سرور</Label>
+            <Input
+              id="edit-server"
+              dir="ltr"
+              className="text-start font-mono text-xs"
+              placeholder="Alpari-MT5-Demo"
+              value={form.server}
+              onChange={(e) => setForm({ ...form, server: e.target.value })}
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="edit-login">شماره حساب (اختیاری)</Label>
+              <Input
+                id="edit-login"
+                dir="ltr"
+                className="text-start font-mono text-xs"
+                placeholder="12345678"
+                value={form.login}
+                onChange={(e) => setForm({ ...form, login: e.target.value })}
+              />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="edit-password">رمز عبور (اختیاری)</Label>
+              <Input
+                id="edit-password"
+                dir="ltr"
+                type="password"
+                className="text-start font-mono text-xs"
+                placeholder="خالی = بدون تغییر"
+                value={form.password}
+                onChange={(e) => setForm({ ...form, password: e.target.value })}
+              />
+            </div>
+          </div>
+          <div className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-950/40 px-3 py-2.5">
+            <div>
+              <p className="text-xs font-medium text-zinc-300">نصب پرتابل (Portable)</p>
+              <p className="text-[11px] text-zinc-500">فقط اگر ترمینال را در حالت portable اجرا می‌کنید</p>
+            </div>
+            <Switch
+              checked={form.portable}
+              onCheckedChange={(v) => setForm({ ...form, portable: v })}
+              aria-label="حالت پرتابل"
+            />
+          </div>
+          <p className="text-[11px] leading-5 text-zinc-500">
+            اگر ترمینال از قبل لاگین کرده باشد، شماره حساب و رمز لازم نیست — موتور حساب فعلی ترمینال را شناسایی می‌کند. اطلاعات فقط روی همین سیستم ذخیره می‌شود.
+          </p>
+        </div>
+        <DialogFooter className="gap-2">
+          <Button variant="outline" onClick={() => setOpen(false)} className="h-11 sm:h-9">
+            انصراف
+          </Button>
+          <Button onClick={save} disabled={busy} className="h-11 sm:h-9">
+            {busy ? "در حال ذخیره..." : "ذخیره و اتصال"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function DeleteTerminalDialog({ terminal, onDeleted }: { terminal: TerminalDTO; onDeleted: () => void }) {
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(false);
@@ -323,6 +500,7 @@ function TerminalRow({ terminal, onChanged }: { terminal: TerminalDTO; onChanged
             {connected ? <Power className="size-3.5" /> : <PlugZap className="size-3.5" />}
             {connected ? "قطع" : "اتصال"}
           </Button>
+          <EditTerminalDialog terminal={t} onSaved={onChanged} />
           <DeleteTerminalDialog terminal={t} onDeleted={onChanged} />
         </div>
       </TableCell>
@@ -341,26 +519,39 @@ export function ConnectionsView() {
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="flex items-center gap-2 text-lg font-bold text-zinc-100">
-            <Cable className="size-5 text-amber-500" />
-            اتصالات ترمینال‌ها
-          </h1>
-          <p className="mt-1 text-xs text-zinc-500">
-            مدیریت اتصال، اتصال خودکار و حذف ترمینال‌های متاتریدر ۵
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h1 className="flex items-center gap-2 text-lg font-bold text-zinc-100">
+              <Cable className="size-5 text-amber-500" />
+              اتصالات ترمینال‌ها
+            </h1>
+            <p className="mt-1 text-xs text-zinc-500">
+              مدیریت اتصال، اتصال خودکار و حذف ترمینال‌های متاتریدر ۵
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <ScanTerminalsButton onDone={refresh} />
+            <AddTerminalDialog onCreated={refresh} />
+          </div>
+        </div>
+
+        <div className="flex items-start gap-2.5 rounded-xl border border-emerald-500/25 bg-emerald-500/[0.06] px-4 py-3">
+          <Radar className="mt-0.5 size-4 shrink-0 text-emerald-400" />
+          <p className="text-xs leading-5 text-zinc-400">
+            اسکن خودکار فعال است: پس از هر اجرا، موتور ترمینال‌های متاتریدر ۵ نصب‌شده روی ویندوز را
+            پیدا و به‌صورت خودکار متصل می‌کند — بدون اکسپرت (EA)، بدون فایل MQL5 و بدون ورود دستی
+            اطلاعات. کافی است هر ترمینال یک‌بار با حساب خود لاگین کرده باشد و دکمه
+            «AutoTrading» در آن روشن باشد.
           </p>
         </div>
-        <AddTerminalDialog onCreated={refresh} />
-      </div>
 
-      {terminals.length === 0 ? (
-        <EmptyState
-          icon={<Cable className="size-8" />}
-          title="هنوز ترمینالی ثبت نشده است"
-          hint="برای شروع، یک ترمینال MT5 با مسیر نصب آن اضافه کنید؛ سپس نقش مستر یا اسلیو را در تب «مستر و اسلیوها» تعیین کنید."
-        />
-      ) : (
+        {terminals.length === 0 ? (
+          <EmptyState
+            icon={<Cable className="size-8" />}
+            title="هنوز ترمینالی ثبت نشده است"
+            hint="موتور به‌طور خودکار ترمینال‌های نصب‌شده را پیدا می‌کند؛ دکمه «اسکن ترمینال‌ها» را بزنید یا مسیر terminal64.exe را دستی اضافه کنید. سپس نقش مستر یا اسلیو را در تب «مستر و اسلیوها» تعیین کنید."
+          />
+        ) : (
         <div className="overflow-x-auto rounded-xl border border-zinc-800 bg-zinc-900/60">
           <Table>
             <TableHeader>
