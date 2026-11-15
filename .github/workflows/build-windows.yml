@@ -1,7 +1,10 @@
-# Builds the Windows package on every "v*" tag push and attaches BOTH
+# Builds the Windows package on every "v*" tag push and attaches these
 # deliverables to the GitHub Release for that tag:
-#   1. MT5Copier-Setup.exe        - real Windows installer (Inno Setup)
-#   2. MT5Copier-Windows-x64.zip  - portable package (no installation)
+#   1. MT5Copier-Setup.exe              - real Windows installer (Inno Setup)
+#   2. MT5Copier-Setup-Windows-x64.zip  - the SAME installer wrapped in a
+#                                         ZIP (friendly for browsers/AV that
+#                                         block raw .exe downloads)
+#   3. MT5Copier-Windows-x64.zip        - portable package (no installation)
 # Both contain the ONEFILE WINDOWED MT5CopierEngine.exe (desktop app,
 # v2.0.0): a native WebView2 window with the Persian dashboard + splash
 # skeleton (no browser, no console), the official MetaTrader5 Python API
@@ -93,6 +96,14 @@ jobs:
           $setup = Get-Item "deploy/installer/Output/MT5Copier-Setup.exe"
           Write-Host ("Installer size: {0:N0} bytes" -f $setup.Length)
 
+      - name: Wrap installer EXE in ZIP (classic-install download)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Compress-Archive -Path "deploy/installer/Output/MT5Copier-Setup.exe" -DestinationPath "MT5Copier-Setup-Windows-x64.zip" -Force
+          $zip = Get-Item "MT5Copier-Setup-Windows-x64.zip"
+          Write-Host ("Installer ZIP size: {0:N0} bytes" -f $zip.Length)
+
       - name: Code-sign both EXEs (optional - only when SIGNING_PFX secret is set)
         if: env.SIGNING_PFX != ''
         shell: pwsh
@@ -119,7 +130,11 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $files = @("deploy/installer/Output/MT5Copier-Setup.exe", "MT5Copier-Windows-x64.zip")
+          $files = @(
+            "deploy/installer/Output/MT5Copier-Setup.exe",
+            "MT5Copier-Setup-Windows-x64.zip",
+            "MT5Copier-Windows-x64.zip"
+          )
           $lines = foreach ($f in $files) {
             $h = (Get-FileHash -Algorithm SHA256 $f).Hash.ToLower()
             "$h  $(Split-Path $f -Leaf)"
@@ -133,6 +148,7 @@ jobs:
         with:
           files: |
             deploy/installer/Output/MT5Copier-Setup.exe
+            MT5Copier-Setup-Windows-x64.zip
             MT5Copier-Windows-x64.zip
             CHECKSUMS-SHA256.txt
           tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}

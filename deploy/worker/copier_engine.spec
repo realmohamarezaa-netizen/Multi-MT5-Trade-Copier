@@ -23,6 +23,7 @@
 
 block_cipher = None
 
+import os  # noqa: E402  (used for pathex below)
 from PyInstaller.utils.hooks import collect_all
 
 # Embed the prebuilt dashboard (deploy/worker/ui) inside the EXE.
@@ -47,6 +48,14 @@ for pkg in ("webview", "clr_loader", "pythonnet"):
     binaries += pbinaries
     hiddenimports += phidden
 
+# MetaTrader5's C extension links against the numpy C API at load time;
+# without numpy bundled the bridge subprocess would crash on import.
+for pkg in ("numpy",):
+    pdatas, pbinaries, phidden = collect_all(pkg)
+    datas += pdatas
+    binaries += pbinaries
+    hiddenimports += phidden
+
 a = Analysis(
     ["copier_engine.py"],
     pathex=[os.getcwd()],
@@ -55,7 +64,7 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     runtime_hooks=[],
-    excludes=["tkinter", "matplotlib", "numpy", "pandas"],
+    excludes=["tkinter", "matplotlib", "pandas"],
     cipher=block_cipher,
 )
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
