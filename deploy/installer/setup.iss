@@ -5,7 +5,7 @@
 ; ============================================================
 
 #define MyAppName "Multi-MT5 Trade Copier"
-#define MyAppVersion "1.4.0"
+#define MyAppVersion "2.0.0"
 #define MyAppExeName "MT5CopierEngine.exe"
 
 [Setup]
@@ -42,7 +42,6 @@ Name: "autostart"; Description: "Start the engine automatically at Windows login
 ; ONEFILE engine: the dashboard UI is embedded inside the EXE; the SQLite DB
 ; is created in {app}\db at first run (granted user-write permissions below).
 Source: "..\worker\dist\MT5CopierEngine.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\mql5\MT5CopierEA.mq5"; DestDir: "{app}\mql5"; Flags: ignoreversion
 Source: "..\docs\FA\*"; DestDir: "{app}\docs"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\INSTALL-FA.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README-FA.md"; DestDir: "{app}"; Flags: ignoreversion

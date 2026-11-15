@@ -2,8 +2,10 @@
 # deliverables to the GitHub Release for that tag:
 #   1. MT5Copier-Setup.exe        - real Windows installer (Inno Setup)
 #   2. MT5Copier-Windows-x64.zip  - portable package (no installation)
-# Both contain the ONEFILE MT5CopierEngine.exe with the dashboard embedded,
-# built by PyInstaller on windows-latest.
+# Both contain the ONEFILE MT5CopierEngine.exe (No-EA edition, v2.0.0) with
+# the dashboard embedded and the official MetaTrader5 Python API bundled -
+# no Expert Advisor, no MQL5 file, nothing to install inside the terminals.
+# Built by PyInstaller on windows-latest.
 #
 # Manual re-run: Actions -> Build Windows EXE Package -> Run workflow,
 # set release_tag (e.g. v1.1.0) to attach to an existing release.
@@ -47,7 +49,7 @@ jobs:
         working-directory: deploy/worker
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pyinstaller
+          python -m pip install pyinstaller "MetaTrader5>=5.0.45"
           python -m PyInstaller --noconfirm --clean copier_engine.spec
 
       - name: Assemble portable package
@@ -59,7 +61,6 @@ jobs:
 
           Copy-Item -Force "deploy/worker/dist/MT5CopierEngine.exe" $out
           Copy-Item -Force "deploy/installer/portable-start.bat" (Join-Path $out "start-copier.bat")
-          Copy-Item -Force "deploy/mql5/MT5CopierEA.mq5" $out
           Copy-Item -Recurse -Force "deploy/docs/FA" (Join-Path $out "docs")
           Copy-Item -Force "deploy/INSTALL-FA.md" $out
           Copy-Item -Force "deploy/README-FA.md" $out

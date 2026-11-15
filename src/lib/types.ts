@@ -236,11 +236,12 @@ export interface TestRunDTO {
 }
 
 // ---------- Terminal-side command/event contracts ----------
-// On Windows these travel over local TCP between the central engine
-// and the MQL5 Expert Advisor attached to each terminal.
-// In this sandbox the SimulatorHub implements the same interface.
+// On Windows these travel over local stdin/stdout JSON between the central
+// engine and its per-terminal bridge subprocess (official MetaTrader5 API,
+// no Expert Advisor). In this sandbox the SimulatorHub implements the same
+// interface.
 
-/** Abstraction over one terminal connection (simulator now, EA bridge on Windows). */
+/** Abstraction over one terminal connection (simulator now, MT5 bridge on Windows). */
 export interface TerminalLink {
   isConnected(): boolean
   send(cmd: TerminalCommand): Promise<CommandResult>

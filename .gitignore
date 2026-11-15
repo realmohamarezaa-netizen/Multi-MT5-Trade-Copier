@@ -75,3 +75,11 @@ __pycache__/
 
 # chat upload folder (not project content)
 /upload/
+
+# engine local test runs (sandbox self-test artifacts)
+deploy/worker/db/
+deploy/worker/db-test/
+deploy/worker/engine-test.log
+deploy/worker/db/engine-error.log
+deploy/worker/db/bridge-*.err
+deploy/worker/db/bridge-cfg-*.json

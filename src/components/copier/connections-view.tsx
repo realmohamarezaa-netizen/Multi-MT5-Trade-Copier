@@ -52,7 +52,7 @@ import {
 import { Mono, RelativeTime, faCount } from "./format";
 import { usePolling } from "./use-polling";
 
-const EMPTY_FORM = { name: "", broker: "", server: "", exePath: "" };
+const EMPTY_FORM = { name: "", broker: "", server: "", exePath: "", login: "", password: "" };
 
 function AddTerminalDialog({ onCreated }: { onCreated: () => void }) {
   const [open, setOpen] = useState(false);
@@ -71,6 +71,8 @@ function AddTerminalDialog({ onCreated }: { onCreated: () => void }) {
         broker: form.broker.trim() || undefined,
         server: form.server.trim() || undefined,
         exePath: form.exePath.trim() || undefined,
+        login: form.login.trim() || undefined,
+        password: form.password.trim() || undefined,
       });
       toast.success(`ترمینال «${form.name.trim()}» ثبت شد`);
       setForm(EMPTY_FORM);
@@ -101,7 +103,7 @@ function AddTerminalDialog({ onCreated }: { onCreated: () => void }) {
         <DialogHeader className="text-start">
           <DialogTitle>افزودن ترمینال MT5</DialogTitle>
           <DialogDescription>
-            مسیر نصب ترمینال را دستی وارد کنید؛ موتور از طریق اکسپرت همان مسیر به ترمینال متصل می‌شود.
+            مسیر نصب terminal64.exe را وارد کنید؛ موتور مستقیماً و فقط به‌صورت محلی به ترمینال متصل می‌شود — بدون اکسپرت (EA)، بدون فایل MQL5 و بدون سرور ابری.
           </DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-4">
@@ -138,7 +140,7 @@ function AddTerminalDialog({ onCreated }: { onCreated: () => void }) {
             />
           </div>
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="term-exe">مسیر نصب (exePath)</Label>
+            <Label htmlFor="term-exe">مسیر نصب (terminal64.exe)</Label>
             <Input
               id="term-exe"
               dir="ltr"
@@ -148,6 +150,34 @@ function AddTerminalDialog({ onCreated }: { onCreated: () => void }) {
               onChange={(e) => setForm({ ...form, exePath: e.target.value })}
             />
           </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="term-login">شماره حساب (اختیاری)</Label>
+              <Input
+                id="term-login"
+                dir="ltr"
+                className="text-start font-mono text-xs"
+                placeholder="12345678"
+                value={form.login}
+                onChange={(e) => setForm({ ...form, login: e.target.value })}
+              />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="term-password">رمز عبور (اختیاری)</Label>
+              <Input
+                id="term-password"
+                dir="ltr"
+                type="password"
+                className="text-start font-mono text-xs"
+                placeholder="••••••••"
+                value={form.password}
+                onChange={(e) => setForm({ ...form, password: e.target.value })}
+              />
+            </div>
+          </div>
+          <p className="text-[11px] leading-5 text-zinc-500">
+            اگر ترمینال از قبل لاگین کرده باشد، شماره حساب و رمز عبور لازم نیست — موتور ترمینالِ در حال اجرا را شناسایی می‌کند. اطلاعات فقط روی همین سیستم ذخیره می‌شود.
+          </p>
         </div>
         <DialogFooter className="gap-2">
           <Button variant="outline" onClick={() => setOpen(false)} className="h-11 sm:h-9">
@@ -374,7 +404,7 @@ export function ConnectionsView() {
 
       <div className="flex items-center gap-2 text-[11px] text-zinc-600">
         <MonoChip>tip</MonoChip>
-        در نسخه ویندوز، اتصال از طریق اکسپرت نصب‌شده روی همان مسیر انجام می‌شود؛ بدون ذخیره رمز عبور.
+        اتصال کاملاً محلی است: موتور مستقیماً از طریق رابط رسمی متاتریدر ۵ به هر ترمینال وصل می‌شود؛ بدون اکسپرت، بدون فایل MQL5 و بدون هیچ ترافیکی غیر از اتصال خود ترمینال به بروکر.
       </div>
     </div>
   );

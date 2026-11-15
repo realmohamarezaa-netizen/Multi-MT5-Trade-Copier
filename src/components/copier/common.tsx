@@ -52,7 +52,7 @@ export const TERMINAL_STATUS_META: Record<
     label: "خطا",
     dot: "bg-red-500",
     badge: "border-red-500/30 bg-red-500/10 text-red-400",
-    hint: "پاسخ نامعتبر یا خطای اکسپرت",
+    hint: "پاسخ نامعتبر از ترمینال یا بروکر",
   },
 };
 

@@ -13,7 +13,6 @@ rd /s /q "%OUT%" 2>nul
 mkdir "%OUT%" >nul
 copy /y "..\worker\dist\MT5CopierEngine.exe" "%OUT%\" >nul
 copy /y "portable-start.bat" "%OUT%\start-copier.bat" >nul
-copy /y "..\mql5\MT5CopierEA.mq5" "%OUT%\" >nul
 xcopy /e /i /y "..\docs\FA\*" "%OUT%\docs\" >nul
 copy /y "..\INSTALL-FA.md" "%OUT%\" >nul
 copy /y "..\README-FA.md" "%OUT%\" >nul

@@ -25,8 +25,8 @@ All timestamps are epoch milliseconds (numbers).
 
 | Endpoint | Body | Description |
 |---|---|---|
-| `POST /api/terminals` | `{name, broker?, server?, exePath?}` | Register terminal |
-| `PATCH /api/terminals/{id}` | `{action, value?}` where action ∈ `connect, disconnect, setRole, enable, disable, pause, resume, autoReconnect` | Terminal management |
+| `POST /api/terminals` | `{name, broker?, server?, exePath?, login?, password?, portable?, magic?, simulated?}` | Register terminal; a bridge subprocess starts immediately |
+| `PATCH /api/terminals/{id}` | `{action, value?}` where action ∈ `connect, disconnect, setRole, enable, disable, pause, resume, autoReconnect, updateConnection` | Terminal management; `updateConnection` body: `{exePath?, login?, password?, server?, portable?, magic?}` restarts the bridge |
 | `DELETE /api/terminals/{id}` | - | Remove terminal |
 | `PUT /api/terminals/{id}/settings` | partial `SlaveSettingsDTO` | Per-slave copy settings |
 | `POST /api/engine` | `{action}` ∈ `start_copying, stop_copying, emergency_stop, restart` | Engine controls |
@@ -34,6 +34,16 @@ All timestamps are epoch milliseconds (numbers).
 | `POST /api/sync` | `{slaveId, action: open_missing\|close_extra}` | Manual reconciliation actions |
 | `POST /api/sim` | `{action, params}` | Simulator controls (Next.js sandbox only; Windows engine returns 409) |
 | `POST /api/tests/run` | - | Start acceptance suite (sandbox only) |
+
+## Bridge architecture (Windows engine, v2.0.0)
+
+The engine spawns one `MT5CopierEngine.exe --bridge <cfg.json>` subprocess per
+terminal. Bridges use the official MetaTrader5 Python API (local IPC to
+terminal64.exe) - no Expert Advisor, no MQL5 file. The master bridge is polled
+(~350ms) and consecutive snapshots are diffed into the same trade events the
+dashboard metrics are built on. Simulated terminals (`simulated: true` /
+`COPIER_DEMO=1`) run a pure-Python mock bridge so the full pipeline can be
+demonstrated without MT5.
 
 ## DTO shapes
 
