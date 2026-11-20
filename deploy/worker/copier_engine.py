@@ -281,6 +281,63 @@ def parse_csv(s: str):
     return [x.strip().upper() for x in (s or "").split(",") if x.strip()]
 
 
+# Persian explanations for the copy-failure codes shown in the dashboard
+# (Execution Monitor / Relations panel show fail_reason verbatim).
+FA_FAIL_REASON = {
+    "offline": "ترمینال اسلیو متصل نیست",
+    "not_connected": "اسلیو در وضعیت متصل نیست",
+    "bridge_dead": "ارتباط با ترمینال اسلیو قطع شد",
+    "timeout": "پاسخ ترمینال اسلیو دیر رسید",
+    "role": "این ترمینال اسلیو نیست",
+    "disabled": "کپی برای این اسلیو غیرفعال است",
+    "paused": "این اسلیو موقتاً متوقف (Pause) است",
+    "buy_disabled": "کپی معاملات خرید برای این اسلیو غیرفعال است",
+    "sell_disabled": "کپی معاملات فروش برای این اسلیو غیرفعال است",
+    "whitelist": "نماد در لیست سفید (Whitelist) این اسلیو نیست",
+    "blacklist": "نماد در لیست سیاه (Blacklist) این اسلیو است",
+    "spread": "اسپرد بروکر بیشتر از حد مجاز تعیین‌شده است",
+    "max_positions": "سقف تعداد پوزیشن‌های این اسلیو پر شده است",
+    "pending_disabled": "کپی سفارش‌های Pending برای این اسلیو غیرفعال است",
+    "unknown_symbol": "نماد روی حساب اسلیو پیدا نشد — نگاشت نماد را بررسی کنید",
+    "engine_stopped": "موتور کپی خاموش است (دکمه شروع کپی را روشن کنید)",
+    "copy_disabled": "کپی سراسری متوقف شده است",
+    "invalid_volume": "حجم سفارش نامعتبر است",
+    "no_position": "پوزیشن متناظر روی اسلیو پیدا نشد",
+    "no_order": "سفارش Pending متناظر روی اسلیو پیدا نشد",
+    "mod_disabled": "کپی تغییرات SL/TP برای این اسلیو غیرفعال است",
+    "partial_disabled": "کپی بستن جزئی برای این اسلیو غیرفعال است",
+    "close_disabled": "بستن همزمان با مستر برای این اسلیو غیرفعال است",
+    "position_not_found": "پوزیشن روی اسلیو پیدا نشد (احتمالاً قبلاً بسته شده)",
+    "no_price": "قیمت لحظه‌ای از بروکر دریافت نشد",
+    "no_response": "بروکر به سفارش پاسخ نداد",
+    "broker_reject": "بروکر سفارش را رد کرد",
+    "retcode_10004": "ری‌کوت بروکر (تغییر قیمت) — تلاش مجدد ناموفق بود",
+    "retcode_10006": "بروکر سفارش را رد کرد",
+    "retcode_10014": "حجم سفارش نامعتبر است",
+    "retcode_10015": "قیمت سفارش نامعتبر است",
+    "retcode_10016": "استاپ/تارگت بیش از حد به قیمت ورود نزدیک است (بروکر قبول نکرد)",
+    "retcode_10017": "معامله‌گری در این نماد برای حساب شما غیرفعال است",
+    "retcode_10018": "بازار بسته است",
+    "retcode_10019": "مارجین کافی نیست",
+    "retcode_10020": "قیمت تغییر کرد — تلاش مجدد ناموفق بود",
+    "retcode_10021": "قیمت خارج از محدوده مجاز است (Off quotes)",
+    "retcode_10026": "دکمه AutoTrading در ترمینال خاموش است — آن را در نوار ابزار متاتریدر روشن کنید",
+    "retcode_10027": "AutoTrading برای این حساب/ترمینال خاموش است — دکمه AutoTrading را روشن کنید",
+    "retcode_10030": "بروکر این حالت پرکردن سفارش (Filling mode) را قبول نکرد",
+    "retcode_10038": "حجم بستن بیشتر از حجم پوزیشن است",
+    "worker_exception": "خطای داخلی پل ارتباطی ترمینال",
+}
+
+
+def fa_reason(code, reason="") -> str:
+    """Human-facing (Persian-first) copy failure text."""
+    fa = FA_FAIL_REASON.get(str(code or ""))
+    if not fa:
+        return str(reason or code or "unknown")
+    return f"{fa} [{reason}]" if reason else fa
+
+
+
 def floor_to_step(v: float, step: float) -> float:
     if step <= 0:
         return v
@@ -599,6 +656,7 @@ class Mt5Worker(BaseBridgeWorker):
         super().__init__(cfg)
         import MetaTrader5 as mt5  # official MetaQuotes package (Windows only)
         self.mt5 = mt5
+        self._last_trade_allowed = None  # AutoTrading button watch (None = unknown)
         self.OT = {
             mt5.ORDER_TYPE_BUY: ("buy", ""), mt5.ORDER_TYPE_SELL: ("sell", ""),
             mt5.ORDER_TYPE_BUY_LIMIT: ("buy", "buy_limit"), mt5.ORDER_TYPE_SELL_LIMIT: ("sell", "sell_limit"),
@@ -618,23 +676,52 @@ class Mt5Worker(BaseBridgeWorker):
             return "unknown mt5 error"
 
     def init_terminal(self) -> bool:
-        kw = {"timeout": 60000}
+        """Attach to the RUNNING terminal (never launches it - the process
+        list is checked before this is called).
+
+        Attempts, in order:
+          1) explicit login/password/server when configured on the terminal
+          2) saved-account attach (path only) - the terminal logs in with
+             the account it already has
+          3) no-path attach, ONLY when exactly one terminal64.exe is running
+             (covers moved/renamed install folders without risking a
+             cross-terminal attach)
+        """
+        mt5 = self.mt5
         p = str(self.cfg.get("exePath") or "").strip()
-        if p:
-            kw["path"] = p
-        if self.cfg.get("portable"):
-            kw["portable"] = True
         login = str(self.cfg.get("login") or "").strip()
+        base = {"timeout": 60000}
+        if p:
+            base["path"] = p
+        if self.cfg.get("portable"):
+            base["portable"] = True
+        attempts = []
         if login:
-            kw.update({
+            full = dict(base)
+            full.update({
                 "login": int(login),
                 "password": str(self.cfg.get("password") or ""),
                 "server": str(self.cfg.get("server") or "").strip(),
             })
-        try:
-            return bool(self.mt5.initialize(**kw))
-        except Exception:
-            return False
+            attempts.append(full)
+        attempts.append(dict(base))
+        for kw in attempts:
+            try:
+                if mt5.initialize(**kw):
+                    return True
+            except Exception:
+                pass
+            try:
+                mt5.shutdown()  # clean state before the next attempt
+            except Exception:
+                pass
+        if p and len(running_terminal64_paths()) == 1:
+            try:
+                if mt5.initialize(timeout=60000, portable=bool(self.cfg.get("portable"))):
+                    return True
+            except Exception:
+                pass
+        return False
 
     def account_msg(self):
         try:
@@ -710,6 +797,55 @@ class Mt5Worker(BaseBridgeWorker):
         detail = getattr(res, "comment", "") or ""
         return {"ok": False, "retcode": ret, "code": f"retcode_{ret}", "error": f"{text}{(' - ' + detail) if detail else ''}"}
 
+    # -- resilient order execution --------------------------------------------
+    # Real brokers reject orders for reasons a naive single-shot order_send
+    # turns into permanent copy failures: unsupported filling mode (10030),
+    # requotes / price-changed / off-quotes. Every deal now goes through
+    # _execute_deal which cycles filling modes and re-quotes with fresh
+    # prices before giving up.
+
+    TRANSIENT_RETCODES = (10004, 10015, 10020, 10021)  # requote/invalid price/price changed/off quotes
+
+    def _filling_candidates(self, si):
+        mt5 = self.mt5
+        order = [mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_RETURN]
+        primary = self.pick_filling(si)
+        return [primary] + [m for m in order if m != primary]
+
+    def _execute_deal(self, base_req: dict, si, price_fn) -> dict:
+        """Execute one deal with broker-realistic resilience.
+
+        - retcode 10030 (unsupported filling mode): cycle FOK -> IOC -> RETURN
+        - transient rejects (requote / price changed / off quotes / invalid
+          price): refresh the price via price_fn and retry
+        - anything else (AutoTrading off, no money, market closed...) is a
+          hard reject: return immediately so the engine can report it
+        Returns the LAST attempt result (ok=True on success).
+        """
+        mt5 = self.mt5
+        modes = self._filling_candidates(si)
+        mi = 0
+        result = {"ok": False, "code": "no_response", "error": self._err()}
+        for _attempt in range(4):
+            req = dict(base_req)
+            req["type_filling"] = modes[mi % len(modes)]
+            r = self.send_request(req)
+            if r.get("ok"):
+                return r
+            result = r
+            ret = int(r.get("retcode") or 0)
+            if ret == 10030:  # unsupported filling mode -> try the next mode
+                mi += 1
+                continue
+            if ret in self.TRANSIENT_RETCODES and price_fn is not None:
+                time.sleep(0.12)  # brief re-quote pause
+                new_price = price_fn()
+                if new_price > 0:
+                    base_req["price"] = new_price
+                continue
+            break  # hard rejection - no retry helps
+        return result
+
     def _dead_check(self, payload):
         if not self.alive():
             worker_notify({"type": "status", "status": "reconnecting", "error": self._err()})
@@ -719,6 +855,21 @@ class Mt5Worker(BaseBridgeWorker):
     # -- commands --------------------------------------------------------------
 
     def snapshot_payload(self, event_key="") -> dict:
+        # watch the AutoTrading button so the user learns IMMEDIATELY when
+        # copies would start failing (retcode 10026/10027)
+        try:
+            ti = self.mt5.terminal_info()
+            allowed = bool(getattr(ti, "trade_allowed", True)) if ti is not None else True
+            if self._last_trade_allowed is None:
+                self._last_trade_allowed = allowed
+            elif allowed != self._last_trade_allowed:
+                self._last_trade_allowed = allowed
+                if not allowed:
+                    self.notify_status("autotrading_off", "AutoTrading was disabled - copies will be rejected")
+                else:
+                    self.notify_status("autotrading_on", "")
+        except Exception:
+            pass
         acc = self.account_msg()
         if not acc:
             return self._dead_check({"ok": False, "code": "no_account", "error": self._err()})
@@ -773,15 +924,24 @@ class Mt5Worker(BaseBridgeWorker):
         otype = mt5.ORDER_TYPE_BUY if side == "buy" else mt5.ORDER_TYPE_SELL
         price = float(tick.ask if side == "buy" else tick.bid)
         comment = ("MC:open:" + str(c.get("masterTicket") or ""))[:31]
+
+        def fresh_price() -> float:
+            try:
+                t2 = mt5.symbol_info_tick(symbol)
+            except Exception:
+                return 0.0
+            if t2 and t2.ask and t2.bid:
+                return float(t2.ask if side == "buy" else t2.bid)
+            return 0.0
+
         req = {
             "action": mt5.TRADE_ACTION_DEAL, "symbol": symbol,
             "volume": float(c.get("volume") or 0), "type": otype, "price": price,
             "sl": float(c.get("sl") or 0), "tp": float(c.get("tp") or 0),
             "deviation": int(c.get("deviation") or 20), "magic": self.magic,
             "comment": comment, "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": self.pick_filling(si),
         }
-        r = self.send_request(req)
+        r = self._execute_deal(req, si, fresh_price)
         if not r.get("ok"):
             return {k: v for k, v in r.items() if k != "res"}
         res = r["res"]
@@ -819,14 +979,23 @@ class Mt5Worker(BaseBridgeWorker):
         vol = float(p.volume if volume is None else min(float(volume), float(p.volume)))
         if vol <= 0:
             return {"ok": False, "code": "invalid_volume", "error": "close volume <= 0"}
+
+        def fresh_price() -> float:
+            try:
+                t2 = mt5.symbol_info_tick(p.symbol)
+            except Exception:
+                return 0.0
+            if t2 and t2.ask and t2.bid:
+                return float(t2.ask if side == "buy" else t2.bid)
+            return 0.0
+
         req = {
             "action": mt5.TRADE_ACTION_DEAL, "symbol": p.symbol, "volume": vol,
             "type": otype, "position": int(p.ticket), "price": price,
             "deviation": int(c.get("deviation") or 20), "magic": self.magic,
             "comment": "MC:close", "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": self.pick_filling(si),
         }
-        r = self.send_request(req)
+        r = self._execute_deal(req, si, fresh_price)
         if not r.get("ok"):
             return {k: v for k, v in r.items() if k != "res"}
         return {"ok": True, "ticket": str(p.ticket), "price": float(r["res"].price or price)}
@@ -864,9 +1033,10 @@ class Mt5Worker(BaseBridgeWorker):
             "price": float(c.get("price") or 0),
             "sl": float(c.get("sl") or 0), "tp": float(c.get("tp") or 0),
             "magic": self.magic, "comment": comment, "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_RETURN,
         }
-        r = self.send_request(req)
+        # pending price is fixed by the engine -> price_fn=None disables
+        # re-quote retries; filling-mode cycling (10030) still applies
+        r = self._execute_deal(req, si, None)
         if not r.get("ok"):
             return {k: v for k, v in r.items() if k != "res"}
         res = r["res"]
@@ -934,7 +1104,7 @@ class Mt5Worker(BaseBridgeWorker):
             time.sleep(3.0)
         self.notify_status("connecting")
         ok = False
-        for _ in range(6):
+        for _ in range(3):
             if self.init_terminal():
                 ok = True
                 break
@@ -944,6 +1114,18 @@ class Mt5Worker(BaseBridgeWorker):
         acc = self.account_msg()
         if not acc:
             raise WorkerFatal(f"terminal started but account is not ready: {self._err()}")
+        # AutoTrading (Algo Trading button) must be ON or every order the
+        # copier sends will be rejected with retcode 10026/10027 - surface
+        # this immediately instead of failing copies silently.
+        try:
+            ti = self.mt5.terminal_info()
+            allowed = bool(getattr(ti, "trade_allowed", True)) if ti is not None else True
+            self._last_trade_allowed = allowed
+            if not allowed:
+                self.notify_status("autotrading_off",
+                                   "AutoTrading disabled - copies will be rejected until the AutoTrading button is enabled")
+        except Exception:
+            pass
         return acc
 
     def do_tick(self, req) -> dict:
@@ -1626,7 +1808,11 @@ class Bridge:
             self.engine.register_bridge(self.terminal_id, self, msg)
         elif mtype == "status":
             st = msg.get("status")
-            if st:
+            if st == "autotrading_off":
+                self.engine.warn_autotrading(self.terminal_id)
+            elif st == "autotrading_on":
+                self.engine.clear_autotrading(self.terminal_id)
+            elif st:
                 self.waiting = str(st) == "waiting"
                 self.engine.set_status(self.terminal_id, st)
                 log("warn" if st != "waiting" else "info", "connection",
@@ -1684,6 +1870,8 @@ class Engine:
         self.bridge_desired = {}    # terminal_id -> bool (should a bridge run?)
         self.terminal_tasks = {}    # terminal_id -> [keeper task, poll task]
         self._drift_sig = {}        # slave_id -> last drift signature (dedupe logs)
+        self._autotrading_warned = {}  # terminal_id -> True (AutoTrading warning shown)
+        self._no_slaves_warned = False
         self.db = DB
 
     # -- lifecycle management ---------------------------------------------------
@@ -1799,6 +1987,8 @@ class Engine:
         """Poll one terminal bridge: master snapshots are diffed into events,
         every terminal snapshot refreshes the local ledger mirror."""
         try:
+            fail_streak = 0
+            last_fail_log = 0.0
             while True:
                 trow = DB.one("SELECT role FROM terminals WHERE id=?", (tid,))
                 if not trow:
@@ -1810,6 +2000,7 @@ class Engine:
                     try:
                         res = await b.command({"kind": "snapshot"}, timeout=max(8.0, interval * 8))
                         if res.get("ok") and res.get("snapshot"):
+                            fail_streak = 0
                             self.last_prices[tid] = res.get("prices", {}) or {}
                             self.ingest_snapshot(tid, res)
                             if role == "master":
@@ -1818,6 +2009,17 @@ class Engine:
                                         await self.on_event(tid, evt)
                                 else:
                                     self.diff_master(tid, res)  # first poll = baseline, no events
+                        else:
+                            # the bridge is alive but could not read the terminal
+                            # (stuck MT5 API / broker disconnect) - make it VISIBLE
+                            fail_streak += 1
+                            if fail_streak >= 3 and time.time() - last_fail_log > 45:
+                                last_fail_log = time.time()
+                                nrow = DB.one("SELECT name FROM terminals WHERE id=?", (tid,))
+                                log("warn", "engine",
+                                    f"{nrow['name'] if nrow else tid}: خواندن وضعیت از ترمینال ناموفق بود "
+                                    f"({res.get('code', 'unknown')}) — اگر تکرار شد، اتصال ترمینال به بروکر را بررسی کنید",
+                                    tid)
                     except Exception as e:
                         log("error", "engine", f"poll failed: {e}", tid)
                 await asyncio.sleep(interval)
@@ -1891,6 +2093,24 @@ class Engine:
             name = DB.one("SELECT name FROM terminals WHERE id=?", (tid,))
             log("success" if status == "connected" else "info", "connection",
                 f"{name['name'] if name else tid}: {prev['status']} -> {status}")
+
+    def warn_autotrading(self, tid: str):
+        """The bridge reports the AutoTrading button state; without it every
+        copy order is rejected (10026/10027) - warn ONCE per session."""
+        if self._autotrading_warned.get(tid):
+            return
+        self._autotrading_warned[tid] = True
+        row = DB.one("SELECT name FROM terminals WHERE id=?", (tid,))
+        name = row["name"] if row else tid
+        log("warn", "trade",
+            f"{name}: دکمه AutoTrading در این ترمینال خاموش است — تا روشن کردن آن هیچ معامله‌ای روی این ترمینال اجرا نمی‌شود",
+            tid, name)
+
+    def clear_autotrading(self, tid: str):
+        if self._autotrading_warned.pop(tid, None):
+            row = DB.one("SELECT name FROM terminals WHERE id=?", (tid,))
+            name = row["name"] if row else tid
+            log("success", "trade", f"{name}: AutoTrading فعال شد — اجرای معاملات کپی برقرار است", tid, name)
 
     def update_account(self, tid, msg):
         try:
@@ -2089,6 +2309,36 @@ class Engine:
         digits = int((spec or {}).get("digits", 5))
         return [round(float(p) * k, digits) if p else 0.0 for p in prices]
 
+    @staticmethod
+    def anchor_slave_stops(m_entry, s_entry, k, spec, *stops):
+        """Entry-anchored cross-broker SL/TP conversion (the optimal form).
+
+        slave_stop = slave_entry - (master_entry - master_stop) * k
+
+        - the DISTANCE comes from the master's own entry (risk taken at open
+          time is preserved even when the copy happens late)
+        - k is the same-instant cross-broker price scale (slave live / master
+          live), so the distance keeps its meaning on any broker/symbol scale
+        - sign handling works for buy AND sell automatically
+        Returns rounded prices (0 stays 0).
+        """
+        try:
+            k = float(k)
+        except Exception:
+            k = 1.0
+        if not k or k <= 0:
+            k = 1.0
+        m_entry = float(m_entry or 0)
+        s_entry = float(s_entry or 0)
+        out = []
+        for p in stops:
+            p = float(p or 0)
+            if p > 0 and m_entry > 0 and s_entry > 0:
+                out.append(Engine.round_price(s_entry - (m_entry - p) * k, spec))
+            else:
+                out.append(p)
+        return out
+
     # -- master event handlers ---------------------------------------------------------
 
     async def handle_master_open(self, tid, evt):
@@ -2106,9 +2356,21 @@ class Engine:
         log("info", "trade", f"MASTER #{ticket} {side} {symbol} {volume} lots @ {evt.get('price')}")
         master = DB.one("SELECT * FROM terminals WHERE id=?", (tid,))
         slaves = DB.q("SELECT * FROM terminals WHERE role='slave'")
-        await asyncio.gather(*[
+        if not slaves:
+            if not self._no_slaves_warned:
+                self._no_slaves_warned = True
+                log("warn", "copy",
+                    "هیچ ترمینالی با نقش اسلیو ثبت نشده است — معاملات مستر کپی نمی‌شوند. نقش اسلیو را در صفحه اتصالات تنظیم کنید", tid)
+            return
+        self._no_slaves_warned = False
+        results = await asyncio.gather(*[
             self.copy_open_to_slave(slave, master, evt, detected) for slave in slaves
         ], return_exceptions=True)
+        outs = [r for r in results if isinstance(r, tuple)]
+        if outs and not any(r[0] == "executed" for r in outs):
+            detail = " | ".join(f"{r[2]}" for r in outs if r[2])
+            log("warn", "copy",
+                f"هیچ اسلیویی معامله مستر #{ticket} را دریافت نکرد — {detail}", tid)
 
     async def copy_open_to_slave(self, slave, master, evt, detected):
         try:
@@ -2117,25 +2379,27 @@ class Engine:
             event_key = f"open:{evt.get('ticket')}"
             exists = DB.one("SELECT id, status FROM copy_ops WHERE slave_terminal_id=? AND event_key=?", (sid, event_key))
             if exists:
-                return  # idempotency layer 1
+                return ("duplicate", "", "")  # idempotency layer 1
             op_id = DB.x(
                 "INSERT OR IGNORE INTO copy_ops (master_terminal_id, slave_terminal_id, master_ticket, action, event_key, status, detected_at) VALUES (?,?,?,?,?,'pending',?)",
                 (master["id"], sid, str(evt.get("ticket")), "open", event_key, detected),
             )
             if not op_id:
-                return
+                return ("duplicate", "", "")
             symbol = evt.get("symbol", "")
             side = evt.get("side", "buy")
             kind = "pending" if evt.get("pendingType") else "position"
 
             def fail(status, code, reason, metric=False):
+                text = fa_reason(code, reason)
                 DB.x("UPDATE copy_ops SET status=?, fail_code=?, fail_reason=?, done_at=? WHERE id=?",
-                     (status, code, reason, now_ms(), op_id))
+                     (status, code, text, now_ms(), op_id))
                 log("warn" if status in ("skipped", "missed") else "error", "copy",
-                    f"Copy {status} for master #{evt.get('ticket')} {symbol}: {reason}", sid, slave["name"], f"code={code}")
+                    f"Copy {status} for master #{evt.get('ticket')} {symbol}: {text}", sid, slave["name"], f"code={code}")
                 if metric:
                     DB.x("INSERT INTO metric_events (ts, slave_terminal_id, master_ticket, action, total_ms, ok) VALUES (?,?,?,?,?,0)",
                          (detected, sid, str(evt.get("ticket")), "open", now_ms() - detected))
+                return (status, code, text)
 
             if not self.engine_running():
                 return fail("skipped", "engine_stopped", "Engine/copying is stopped")
@@ -2179,7 +2443,7 @@ class Engine:
                         log("info", "copy",
                             f"Linked slave filled pending {sp['ticket']} to master #{evt.get('ticket')} (double-open prevented)",
                             sid, slave["name"])
-                        return
+                        return ("executed", "", "")
             except Exception:
                 pass
 
@@ -2187,18 +2451,24 @@ class Engine:
             tp = float(evt.get("tp", 0)) if s["copy_tp"] else 0
             m_entry = float(evt.get("price", 0))
             pred_entry = 0.0
+            k_scale = 1.0
             if sl > 0 or tp > 0:
                 # predicted slave fill: the LIVE price on the SLAVE terminal
                 tick = await bridge.command({"kind": "tick", "symbol": mapped}, timeout=5)
                 if tick.get("ok"):
                     pred_entry = float(tick.get("ask") or 0) if side == "buy" else float(tick.get("bid") or 0)
                 if m_entry > 0 and pred_entry > 0:
-                    # SL/TP relative to the entry prices -> identical relative
-                    # stop/target distance on ANY broker / symbol scale
-                    sl, tp = self.scale_prices(pred_entry / m_entry, spec, sl, tp)
+                    # cross-broker scale: SAME-INSTANT live slave price vs LIVE
+                    # master price (falls back to the master entry price when
+                    # the master tick is not available yet)
+                    m_live = self.mid_price((self.last_prices.get(master["id"]) or {}).get(str(symbol).upper()) or {})
+                    ref = m_live if m_live > 0 else m_entry
+                    k_scale = pred_entry / ref
+                    sl, tp = self.anchor_slave_stops(m_entry, pred_entry, k_scale, spec, sl, tp)
                 elif mapped.upper() != symbol.upper():
                     ratio = await self.price_ratio(master["id"], sid, symbol, mapped)
                     if ratio and abs(ratio - 1.0) > 1e-9:
+                        k_scale = ratio
                         sl, tp = self.scale_prices(ratio, spec, sl, tp)
 
             cmd = {
@@ -2214,13 +2484,14 @@ class Engine:
             if res.get("ok") and res.get("ticket"):
                 sticket = str(res.get("ticket"))
                 actual = float(res.get("price") or 0)
-                if (sl > 0 or tp > 0) and actual > 0 and pred_entry > 0 and m_entry > 0 \
-                        and abs(actual - pred_entry) / pred_entry > 0.0005:
+                if (sl > 0 or tp > 0) and actual > 0 and m_entry > 0 \
+                        and pred_entry > 0 and abs(actual - pred_entry) / max(pred_entry, 1e-9) > 0.0005:
                     # the real fill differs from the predicted entry (slippage /
-                    # another broker) - re-anchor SL/TP to the actual fill price
-                    sl2, tp2 = self.scale_prices(actual / m_entry, spec,
-                                                 float(evt.get("sl", 0)) if s["copy_sl"] else 0,
-                                                 float(evt.get("tp", 0)) if s["copy_tp"] else 0)
+                    # another broker) - re-anchor SL/TP to the ACTUAL fill price
+                    # with the same cross-broker scale
+                    sl2, tp2 = self.anchor_slave_stops(m_entry, actual, k_scale, spec,
+                                                       float(evt.get("sl", 0)) if s["copy_sl"] else 0,
+                                                       float(evt.get("tp", 0)) if s["copy_tp"] else 0)
                     if sl2 != sl or tp2 != tp:
                         corr = await bridge.command({"kind": "modify_sltp", "ticket": sticket,
                                                      "symbol": mapped, "sl": sl2, "tp": tp2}, timeout=8)
@@ -2241,16 +2512,20 @@ class Engine:
                 log("success", "copy",
                     f"Copied master #{evt.get('ticket')} {side} {symbol} -> {mapped} {vol} lots",
                     sid, slave["name"], f"slaveTicket={sticket} latency={ack - detected}ms")
+                return ("executed", "", "")
             else:
                 rcode = res.get("code", "broker_reject")
+                text = fa_reason(rcode, res.get("error", "broker rejected"))
                 DB.x("UPDATE copy_ops SET status='failed', fail_code=?, fail_reason=?, ack_at=?, done_at=?, latency_ms=?, total_ms=? WHERE id=?",
-                     (rcode, res.get("error", "broker rejected"), ack, done, ack - detected, done - detected, op_id))
+                     (rcode, text, ack, done, ack - detected, done - detected, op_id))
                 DB.x("INSERT INTO metric_events (ts, slave_terminal_id, master_ticket, action, total_ms, ok) VALUES (?,?,?,?,?,0)",
                      (detected, sid, str(evt.get("ticket")), "open", done - detected))
-                log("error", "copy", f"Copy FAILED for master #{evt.get('ticket')} {symbol}: {res.get('error')}",
+                log("error", "copy", f"Copy FAILED for master #{evt.get('ticket')} {symbol}: {text}",
                     sid, slave["name"], f"code={rcode}")
+                return ("failed", rcode, text)
         except Exception as e:
             log("error", "copy", f"copy pipeline error for master #{evt.get('ticket')}: {e}")
+            return ("failed", "pipeline_error", fa_reason("worker_exception", str(e)))
 
     async def handle_master_close(self, tid, evt, partial):
         detected = now_ms()
@@ -2279,8 +2554,9 @@ class Engine:
             slave_pos = DB.one("SELECT * FROM positions WHERE terminal_id=? AND master_ticket=? AND kind='position'", (sid, ticket))
 
             def miss(status, code, reason):
-                DB.x("UPDATE copy_ops SET status=?, fail_code=?, fail_reason=?, done_at=? WHERE id=?", (status, code, reason, now_ms(), op_id))
-                log("warn", "copy", f"{action} for master #{ticket}: {reason}", sid, slave["name"])
+                text = fa_reason(code, reason)
+                DB.x("UPDATE copy_ops SET status=?, fail_code=?, fail_reason=?, done_at=? WHERE id=?", (status, code, text, now_ms(), op_id))
+                log("warn", "copy", f"{action} for master #{ticket}: {text}", sid, slave["name"])
 
             if partial and not s["copy_partial_close"]:
                 if op_id:
@@ -2324,9 +2600,10 @@ class Engine:
                     self.move_to_closed(sid, slave_pos["ticket"], reason="engine", close_price=evt.get("price"))
                     log("success", "copy", f"Closed slave position {slave_pos['ticket']} (master #{ticket})", sid, slave["name"])
             else:
+                text = fa_reason(res.get("code", "broker_reject"), res.get("error", "broker rejected"))
                 DB.x("UPDATE copy_ops SET status='failed', fail_code=?, fail_reason=?, done_at=? WHERE id=?",
-                     (res.get("code", "broker_reject"), res.get("error", "broker rejected"), now_ms(), op_id))
-                log("error", "copy", f"{action} copy FAILED for master #{ticket}: {res.get('error')}", sid, slave["name"])
+                     (res.get("code", "broker_reject"), text, now_ms(), op_id))
+                log("error", "copy", f"{action} copy FAILED for master #{ticket}: {text}", sid, slave["name"])
 
     async def handle_master_modify(self, tid, evt):
         detected = now_ms()
@@ -2344,15 +2621,15 @@ class Engine:
             )
             if not op_id or not s["copy_modifications"]:
                 if op_id:
-                    DB.x("UPDATE copy_ops SET status='skipped', fail_code='mod_disabled', fail_reason='copyModifications disabled', done_at=? WHERE id=?", (now_ms(), op_id))
+                    DB.x("UPDATE copy_ops SET status='skipped', fail_code='mod_disabled', fail_reason=?, done_at=? WHERE id=?", (fa_reason("mod_disabled"), now_ms(), op_id))
                 continue
             slave_pos = DB.one("SELECT * FROM positions WHERE terminal_id=? AND master_ticket=? AND kind='position'", (sid, ticket))
             if not slave_pos:
-                DB.x("UPDATE copy_ops SET status='missed', fail_code='no_position', fail_reason='no copied position', done_at=? WHERE id=?", (now_ms(), op_id))
+                DB.x("UPDATE copy_ops SET status='missed', fail_code='no_position', fail_reason=?, done_at=? WHERE id=?", (fa_reason("no_position"), now_ms(), op_id))
                 continue
             bridge = self.sessions.get(sid)
             if not bridge or not bridge.alive:
-                DB.x("UPDATE copy_ops SET status='failed', fail_code='offline', fail_reason='slave offline', done_at=? WHERE id=?", (now_ms(), op_id))
+                DB.x("UPDATE copy_ops SET status='failed', fail_code='offline', fail_reason=?, done_at=? WHERE id=?", (fa_reason("offline"), now_ms(), op_id))
                 continue
             sl = float(evt.get("sl", 0)) if s["copy_sl"] else 0
             tp = float(evt.get("tp", 0)) if s["copy_tp"] else 0
@@ -2380,7 +2657,7 @@ class Engine:
                      (sl, tp, sid, slave_pos["ticket"]))
             else:
                 DB.x("UPDATE copy_ops SET status='failed', fail_code=?, fail_reason=?, done_at=? WHERE id=?",
-                     (res.get("code", "broker_reject"), res.get("error", ""), now_ms(), op_id))
+                     (res.get("code", "broker_reject"), fa_reason(res.get("code", "broker_reject"), res.get("error", "")), now_ms(), op_id))
 
     async def handle_master_pending(self, tid, evt, placed):
         detected = now_ms()
@@ -2411,7 +2688,7 @@ class Engine:
                 continue
             bridge = self.sessions.get(sid)
             if not bridge or not bridge.alive:
-                DB.x("UPDATE copy_ops SET status='failed', fail_code='offline', fail_reason='slave offline', done_at=? WHERE id=?", (now_ms(), op_id))
+                DB.x("UPDATE copy_ops SET status='failed', fail_code='offline', fail_reason=?, done_at=? WHERE id=?", (fa_reason("offline"), now_ms(), op_id))
                 continue
             if placed:
                 mapped = parse_mapping(s["symbol_mapping"]).get(evt.get("symbol", "").upper(), evt.get("symbol", "").upper())
@@ -2445,7 +2722,7 @@ class Engine:
                         if ratio and abs(ratio - 1.0) > 1e-9 and spec:
                             price, sl, tp = self.scale_prices(ratio, spec, price, sl, tp)
                 if code:
-                    DB.x("UPDATE copy_ops SET status='skipped', fail_code=?, fail_reason=?, done_at=? WHERE id=?", (code, reason, now_ms(), op_id))
+                    DB.x("UPDATE copy_ops SET status='skipped', fail_code=?, fail_reason=?, done_at=? WHERE id=?", (code, fa_reason(code, reason), now_ms(), op_id))
                     continue
                 res = await bridge.command({
                     "kind": "place_pending", "symbol": mapped, "side": evt.get("side", "buy"),
@@ -2456,7 +2733,7 @@ class Engine:
             else:
                 slave_pending = DB.one("SELECT * FROM positions WHERE terminal_id=? AND master_ticket=? AND kind='pending'", (sid, ticket))
                 if not slave_pending:
-                    DB.x("UPDATE copy_ops SET status='missed', fail_code='no_order', fail_reason='no pending on slave', done_at=? WHERE id=?", (now_ms(), op_id))
+                    DB.x("UPDATE copy_ops SET status='missed', fail_code='no_order', fail_reason=?, done_at=? WHERE id=?", (fa_reason("no_order"), now_ms(), op_id))
                     continue
                 res = await bridge.command({"kind": "cancel_pending", "ticket": slave_pending["ticket"], "symbol": slave_pending["symbol"]})
                 if res.get("ok"):
@@ -2466,7 +2743,7 @@ class Engine:
                     log("success", "copy", f"Cancelled slave pending {slave_pending['ticket']} (master #{ticket})", sid, slave["name"])
                     continue
                 DB.x("UPDATE copy_ops SET status='failed', fail_code=?, fail_reason=?, done_at=? WHERE id=?",
-                     (res.get("code", "broker_reject"), res.get("error", ""), now_ms(), op_id))
+                     (res.get("code", "broker_reject"), fa_reason(res.get("code", "broker_reject"), res.get("error", "")), now_ms(), op_id))
                 continue
             if res.get("ok") and res.get("ticket"):
                 DB.x("UPDATE copy_ops SET status='executed', slave_ticket=?, done_at=?, latency_ms=? WHERE id=?",
@@ -2481,10 +2758,10 @@ class Engine:
                     )
             elif not res.get("ok") and placed:
                 DB.x("UPDATE copy_ops SET status='failed', fail_code=?, fail_reason=?, done_at=? WHERE id=?",
-                     (res.get("code", "broker_reject"), res.get("error", ""), now_ms(), op_id))
+                     (res.get("code", "broker_reject"), fa_reason(res.get("code", "broker_reject"), res.get("error", "")), now_ms(), op_id))
             elif not res.get("ok"):
                 DB.x("UPDATE copy_ops SET status='failed', fail_code=?, fail_reason=?, done_at=? WHERE id=?",
-                     (res.get("code", "broker_reject"), res.get("error", ""), now_ms(), op_id))
+                     (res.get("code", "broker_reject"), fa_reason(res.get("code", "broker_reject"), res.get("error", "")), now_ms(), op_id))
 
     # -- reconciliation ------------------------------------------------------------
 
