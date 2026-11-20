@@ -64,8 +64,8 @@ else:
 DB_PATH = Path(os.environ.get("COPIER_DB", BASE / "db" / "mt5copier.db"))
 HTTP_HOST = "127.0.0.1"
 HTTP_PORT = int(os.environ.get("COPIER_HTTP_PORT", "8321"))
-MASTER_POLL_MS = int(os.environ.get("COPIER_MASTER_POLL_MS", "350"))
-SLAVE_POLL_MS = int(os.environ.get("COPIER_SLAVE_POLL_MS", "1200"))
+MASTER_POLL_MS = int(os.environ.get("COPIER_MASTER_POLL_MS", "150"))
+SLAVE_POLL_MS = int(os.environ.get("COPIER_SLAVE_POLL_MS", "400"))
 BRIDGE_READY_TIMEOUT = int(os.environ.get("COPIER_BRIDGE_TIMEOUT", "90"))
 
 now_ms = lambda: int(time.time() * 1000)  # noqa: E731
@@ -390,6 +390,58 @@ def worker_notify(obj: dict) -> None:
     emit_json(obj)
 
 
+def running_terminal64_paths() -> set:
+    """File paths of every RUNNING terminal64.exe process (Windows only).
+
+    Used to ATTACH to terminals the user opened manually - the engine never
+    launches MetaTrader by itself (mt5.initialize would silently start the
+    terminal, so we always check the process list first).
+    """
+    if sys.platform != "win32":
+        return set()
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        psapi = ctypes.WinDLL("Psapi.dll")
+        k32 = ctypes.WinDLL("kernel32.dll")
+        psapi.EnumProcesses.restype = wintypes.BOOL
+        psapi.EnumProcesses.argtypes = [ctypes.POINTER(wintypes.DWORD), wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+        k32.OpenProcess.restype = wintypes.HANDLE
+        k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        k32.CloseHandle.restype = wintypes.BOOL
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        k32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+        k32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+
+        arr = (wintypes.DWORD * 8192)()
+        needed = wintypes.DWORD()
+        if not psapi.EnumProcesses(arr, ctypes.sizeof(arr), ctypes.byref(needed)):
+            return set()
+        count = min(needed.value // ctypes.sizeof(wintypes.DWORD), 8192)
+        out = set()
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        for i in range(count):
+            pid = arr[i]
+            if not pid:
+                continue
+            h = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not h:
+                continue
+            try:
+                buf = ctypes.create_unicode_buffer(2048)
+                size = wintypes.DWORD(2048)
+                if k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+                    p = buf.value
+                    if p.lower().endswith("terminal64.exe"):
+                        out.add(p)
+            finally:
+                k32.CloseHandle(h)
+        return out
+    except Exception:
+        return set()
+
+
 def _serve_stdio(dispatch, make_ready) -> int:
     """Serve the engine over stdin/stdout (dev/test fallback transport)."""
     global WORKER_NOTIFY
@@ -452,6 +504,9 @@ def _serve_socket(cfg, dispatch, make_ready) -> int:
 
     WORKER_NOTIFY = _send
     try:
+        # authenticate first, then let make_ready() stream live status updates
+        # (e.g. "waiting" while the user has not opened the terminal yet)
+        _send({"type": "hello", "token": token})
         try:
             ready = make_ready()
         except WorkerFatal as e:
@@ -836,6 +891,8 @@ class Mt5Worker(BaseBridgeWorker):
             return {"ok": True, **acc}
         if kind == "symbol_spec":
             return self.do_symbol_spec(req)
+        if kind == "tick":
+            return self.do_tick(req)
         if kind == "open":
             return self.do_open(req)
         if kind == "close":
@@ -850,9 +907,34 @@ class Mt5Worker(BaseBridgeWorker):
             return self.do_cancel(req)
         return {"ok": False, "code": "unknown_kind", "error": f"unknown command {kind}"}
 
+    def notify_status(self, status: str, error: str = "") -> None:
+        try:
+            worker_notify({"type": "status", "status": status, "error": error})
+        except Exception:
+            pass
+
+    def _terminal_process_running(self) -> bool:
+        """True when THIS terminal (or, if no path is known, any terminal64) is running."""
+        exe = str(self.cfg.get("exePath") or "").strip()
+        paths = running_terminal64_paths()
+        if not exe:
+            return bool(paths)
+        want = _normalize_exe(exe)
+        return any(_normalize_exe(p) == want for p in paths)
+
     def make_ready(self) -> dict:
+        # ATTACH-ONLY policy: the engine never starts MetaTrader by itself.
+        # mt5.initialize() would silently LAUNCH terminal64.exe if it is not
+        # running, so we wait until the user opens the terminal manually.
+        notified_waiting = False
+        while not self._terminal_process_running():
+            if not notified_waiting:
+                self.notify_status("waiting", "MetaTrader is not running - open the terminal manually to connect")
+                notified_waiting = True
+            time.sleep(3.0)
+        self.notify_status("connecting")
         ok = False
-        for _ in range(3):
+        for _ in range(6):
             if self.init_terminal():
                 ok = True
                 break
@@ -863,6 +945,17 @@ class Mt5Worker(BaseBridgeWorker):
         if not acc:
             raise WorkerFatal(f"terminal started but account is not ready: {self._err()}")
         return acc
+
+    def do_tick(self, req) -> dict:
+        """Fresh bid/ask for one symbol (used to scale SL/TP at copy time)."""
+        s = str(req.get("symbol") or "")
+        try:
+            t = self.mt5.symbol_info_tick(s)
+        except Exception:
+            t = None
+        if not t or not t.bid or not t.ask:
+            return {"ok": False, "code": "no_price", "error": f"no tick for {s}"}
+        return {"ok": True, "bid": float(t.bid), "ask": float(t.ask)}
 
     def on_exit(self) -> None:
         try:
@@ -1171,6 +1264,8 @@ class MockTerminal(BaseBridgeWorker):
             return {"ok": True, **self.account_msg()}
         if kind == "symbol_spec":
             return self.do_symbol_spec(req)
+        if kind == "tick":
+            return self.do_tick(req)
         if kind == "open":
             return self.do_open(req)
         if kind == "close":
@@ -1184,6 +1279,13 @@ class MockTerminal(BaseBridgeWorker):
         if kind == "cancel_pending":
             return self.do_cancel(req)
         return {"ok": False, "code": "unknown_kind", "error": f"unknown command {kind}"}
+
+    def do_tick(self, req) -> dict:
+        s = str(req.get("symbol") or "")
+        pr = self.prices_payload().get(s)
+        if not pr:
+            return {"ok": False, "code": "unknown_symbol", "error": f"no simulated price for {s}"}
+        return {"ok": True, **pr}
 
     def make_ready(self) -> dict:
         return self.account_msg()
@@ -1386,6 +1488,7 @@ class Bridge:
         self.specs = {}
         self.proc = None
         self.ready = False
+        self.waiting = False
         self.fatal_error = ""
         self.last_error = ""
         self.pending_acks = {}
@@ -1524,8 +1627,10 @@ class Bridge:
         elif mtype == "status":
             st = msg.get("status")
             if st:
+                self.waiting = str(st) == "waiting"
                 self.engine.set_status(self.terminal_id, st)
-                log("warn", "connection", f"bridge reported: {msg.get('error', '')}", self.terminal_id)
+                log("warn" if st != "waiting" else "info", "connection",
+                    f"bridge reported: {msg.get('error', '')}", self.terminal_id)
         elif mtype == "fatal":
             self.fatal_error = str(msg.get("error", ""))
         elif mtype == "ack":
@@ -1627,6 +1732,7 @@ class Engine:
         """Supervise the bridge subprocess for one terminal (spawn/reconnect)."""
         backoff = 2.0
         logged_no_exe = False
+        logged_waiting = False
         try:
             while self.bridge_desired.get(tid):
                 trow = DB.one("SELECT * FROM terminals WHERE id=?", (tid,))
@@ -1658,6 +1764,16 @@ class Engine:
                         continue
                     self.sessions[tid] = b
                     ok = await b.wait_ready(BRIDGE_READY_TIMEOUT)
+                    if not ok and b.waiting and (b.proc is None or b.proc.returncode is None):
+                        # bridge is alive but the user has not opened this
+                        # terminal yet - do NOT kill it, keep waiting quietly
+                        if not logged_waiting:
+                            log("info", "connection",
+                                f"{trow['name']}: waiting for MetaTrader to be opened manually (the engine never starts terminals by itself)",
+                                tid, trow["name"])
+                            logged_waiting = True
+                        await asyncio.sleep(2.0)
+                        continue
                     if not ok:
                         err = b.fatal_error or b.last_error or "bridge did not report ready in time"
                         tail = ""
@@ -1690,7 +1806,7 @@ class Engine:
                 role = trow["role"]
                 interval = (MASTER_POLL_MS if role == "master" else SLAVE_POLL_MS if role == "slave" else 2000) / 1000.0
                 b = self.sessions.get(tid)
-                if b and b.alive:
+                if b and b.alive and b.ready:
                     try:
                         res = await b.command({"kind": "snapshot"}, timeout=max(8.0, interval * 8))
                         if res.get("ok") and res.get("snapshot"):
@@ -1767,7 +1883,7 @@ class Engine:
         if not prev:
             return
         rc = prev["reconnect_count"]
-        if status == "connected" and prev["status"] in ("reconnecting", "disconnected", "error", "connecting"):
+        if status == "connected" and prev["status"] in ("reconnecting", "disconnected", "error", "connecting", "waiting"):
             rc += 1
             DB.x("UPDATE terminals SET reconnect_count=? WHERE id=?", (rc, tid))
         DB.x("UPDATE terminals SET status=?, last_seen=? WHERE id=?", (status, now_ms(), tid))
@@ -1944,6 +2060,35 @@ class Engine:
         except Exception:
             return round(float(v), 5)
 
+    @staticmethod
+    def mid_price(price) -> float:
+        """Mid price from a {bid, ask} dict (0 when unavailable)."""
+        try:
+            bid = float((price or {}).get("bid") or 0)
+            ask = float((price or {}).get("ask") or 0)
+            if bid > 0 and ask > 0:
+                return (bid + ask) / 2.0
+            return max(bid, ask)
+        except Exception:
+            return 0.0
+
+    @staticmethod
+    def scale_prices(k, spec, *prices):
+        """Scale absolute prices by k = slave_ref / master_ref.
+
+        Preserves the RELATIVE distance of SL/TP from the entry price, which
+        stays identical across brokers, symbols and price scales (the old
+        behaviour copied absolute master prices and diverged on other brokers).
+        """
+        try:
+            k = float(k)
+        except Exception:
+            k = 1.0
+        if not k or k <= 0 or abs(k - 1.0) < 1e-12:
+            return [float(p) if p else 0.0 for p in prices]
+        digits = int((spec or {}).get("digits", 5))
+        return [round(float(p) * k, digits) if p else 0.0 for p in prices]
+
     # -- master event handlers ---------------------------------------------------------
 
     async def handle_master_open(self, tid, evt):
@@ -2040,11 +2185,21 @@ class Engine:
 
             sl = float(evt.get("sl", 0)) if s["copy_sl"] else 0
             tp = float(evt.get("tp", 0)) if s["copy_tp"] else 0
-            if (sl > 0 or tp > 0) and mapped.upper() != symbol.upper():
-                ratio = await self.price_ratio(master["id"], sid, symbol, mapped)
-                if ratio and abs(ratio - 1.0) > 1e-9:
-                    sl = self.round_price(sl * ratio, spec) if sl else 0
-                    tp = self.round_price(tp * ratio, spec) if tp else 0
+            m_entry = float(evt.get("price", 0))
+            pred_entry = 0.0
+            if sl > 0 or tp > 0:
+                # predicted slave fill: the LIVE price on the SLAVE terminal
+                tick = await bridge.command({"kind": "tick", "symbol": mapped}, timeout=5)
+                if tick.get("ok"):
+                    pred_entry = float(tick.get("ask") or 0) if side == "buy" else float(tick.get("bid") or 0)
+                if m_entry > 0 and pred_entry > 0:
+                    # SL/TP relative to the entry prices -> identical relative
+                    # stop/target distance on ANY broker / symbol scale
+                    sl, tp = self.scale_prices(pred_entry / m_entry, spec, sl, tp)
+                elif mapped.upper() != symbol.upper():
+                    ratio = await self.price_ratio(master["id"], sid, symbol, mapped)
+                    if ratio and abs(ratio - 1.0) > 1e-9:
+                        sl, tp = self.scale_prices(ratio, spec, sl, tp)
 
             cmd = {
                 "kind": "open", "symbol": mapped, "side": side, "volume": vol,
@@ -2058,6 +2213,20 @@ class Engine:
             ack, done = int(res.get("at", now_ms())), now_ms()
             if res.get("ok") and res.get("ticket"):
                 sticket = str(res.get("ticket"))
+                actual = float(res.get("price") or 0)
+                if (sl > 0 or tp > 0) and actual > 0 and pred_entry > 0 and m_entry > 0 \
+                        and abs(actual - pred_entry) / pred_entry > 0.0005:
+                    # the real fill differs from the predicted entry (slippage /
+                    # another broker) - re-anchor SL/TP to the actual fill price
+                    sl2, tp2 = self.scale_prices(actual / m_entry, spec,
+                                                 float(evt.get("sl", 0)) if s["copy_sl"] else 0,
+                                                 float(evt.get("tp", 0)) if s["copy_tp"] else 0)
+                    if sl2 != sl or tp2 != tp:
+                        corr = await bridge.command({"kind": "modify_sltp", "ticket": sticket,
+                                                     "symbol": mapped, "sl": sl2, "tp": tp2}, timeout=8)
+                        if corr.get("ok"):
+                            sl, tp = sl2, tp2
+                            log("info", "copy", "SL/TP re-anchored to the slave's actual fill price", sid, slave["name"])
                 DB.x("UPDATE copy_ops SET status='executed', slave_ticket=?, ack_at=?, done_at=?, latency_ms=?, total_ms=? WHERE id=?",
                      (sticket, ack, done, ack - detected, done - detected, op_id))
                 DB.x(
@@ -2189,10 +2358,17 @@ class Engine:
             tp = float(evt.get("tp", 0)) if s["copy_tp"] else 0
             if sl > 0 or tp > 0:
                 spec = await self.ensure_spec(sid, slave_pos["symbol"])
-                ratio = await self.price_ratio(tid, sid, evt.get("symbol", slave_pos["symbol"]), slave_pos["symbol"])
-                if ratio and abs(ratio - 1.0) > 1e-9 and spec:
-                    sl = self.round_price(sl * ratio, spec) if sl else 0
-                    tp = self.round_price(tp * ratio, spec) if tp else 0
+                # re-anchor SL/TP relative to each side's OPEN price so the
+                # relative stop/target distance stays identical across brokers
+                mpos = DB.one("SELECT open_price FROM positions WHERE terminal_id=? AND ticket=? AND kind='position'", (tid, ticket))
+                m_open = float((mpos or {}).get("open_price") or 0)
+                s_open = float(slave_pos["open_price"] or 0)
+                if m_open > 0 and s_open > 0:
+                    sl, tp = self.scale_prices(s_open / m_open, spec, sl, tp)
+                else:
+                    ratio = await self.price_ratio(tid, sid, evt.get("symbol", slave_pos["symbol"]), slave_pos["symbol"])
+                    if ratio and abs(ratio - 1.0) > 1e-9 and spec:
+                        sl, tp = self.scale_prices(ratio, spec, sl, tp)
             res = await bridge.command({
                 "kind": "modify_sltp", "ticket": slave_pos["ticket"], "symbol": slave_pos["symbol"],
                 "sl": sl, "tp": tp,
@@ -2252,12 +2428,22 @@ class Engine:
                                               DB.one("SELECT balance FROM terminals WHERE id=?", (tid,))["balance"],
                                               slave["equity"], s, 0, spec)
                     code = "invalid_volume" if reason else None
-                if not code and mapped != evt.get("symbol", "").upper() and (price > 0 or sl > 0 or tp > 0):
-                    ratio = await self.price_ratio(tid, sid, evt.get("symbol", ""), mapped)
-                    if ratio and abs(ratio - 1.0) > 1e-9 and spec:
-                        price = self.round_price(price * ratio, spec) if price else 0
-                        sl = self.round_price(sl * ratio, spec) if sl else 0
-                        tp = self.round_price(tp * ratio, spec) if tp else 0
+                if not code and (price > 0 or sl > 0 or tp > 0):
+                    # scale the pending entry + SL/TP with the CURRENT market
+                    # levels (live slave-side price), preserving all relative
+                    # distances - correct for any broker / symbol scale
+                    side_ = evt.get("side", "buy")
+                    mtick = self.mid_price((self.last_prices.get(tid) or {}).get(str(evt.get("symbol", "")).upper()) or {})
+                    s_px = 0.0
+                    tick = await bridge.command({"kind": "tick", "symbol": mapped}, timeout=5)
+                    if tick.get("ok"):
+                        s_px = float(tick.get("ask") or 0) if side_ == "buy" else float(tick.get("bid") or 0)
+                    if mtick > 0 and s_px > 0:
+                        price, sl, tp = self.scale_prices(s_px / mtick, spec, price, sl, tp)
+                    elif mapped != evt.get("symbol", "").upper():
+                        ratio = await self.price_ratio(tid, sid, evt.get("symbol", ""), mapped)
+                        if ratio and abs(ratio - 1.0) > 1e-9 and spec:
+                            price, sl, tp = self.scale_prices(ratio, spec, price, sl, tp)
                 if code:
                     DB.x("UPDATE copy_ops SET status='skipped', fail_code=?, fail_reason=?, done_at=? WHERE id=?", (code, reason, now_ms(), op_id))
                     continue

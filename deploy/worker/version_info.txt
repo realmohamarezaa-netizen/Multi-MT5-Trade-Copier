@@ -20,12 +20,12 @@ VSVersionInfo(
       StringTable('040904B0', [
         StringStruct('CompanyName', 'Multi-MT5 Trade Copier Project'),
         StringStruct('FileDescription', 'Multi-MT5 Trade Copier Engine (local trade copier for MetaTrader 5)'),
-        StringStruct('FileVersion', '2.0.1.0'),
+        StringStruct('FileVersion', '2.1.0.0'),
         StringStruct('InternalName', 'MT5CopierEngine'),
         StringStruct('LegalCopyright', 'MIT License'),
         StringStruct('OriginalFilename', 'MT5CopierEngine.exe'),
         StringStruct('ProductName', 'Multi-MT5 Trade Copier'),
-        StringStruct('ProductVersion', '2.0.1.0')
+        StringStruct('ProductVersion', '2.1.0.0')
       ])
     ]),
     VarFileInfo([VarStruct('Translation', [1033, 1200])])

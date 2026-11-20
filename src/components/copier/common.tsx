@@ -36,6 +36,12 @@ export const TERMINAL_STATUS_META: Record<
     badge: "border-amber-500/30 bg-amber-500/10 text-amber-400",
     hint: "اتصال اولیه در جریان است",
   },
+  waiting: {
+    label: "در انتظار ترمینال",
+    dot: "bg-sky-500 animate-pulse",
+    badge: "border-sky-500/30 bg-sky-500/10 text-sky-400",
+    hint: "موتور هرگز متاتریدر را باز نمی‌کند؛ وقتی خودتان ترمینال را باز کنید، خودکار متصل می‌شود",
+  },
   reconnecting: {
     label: "اتصال مجدد",
     dot: "bg-amber-500 animate-pulse",

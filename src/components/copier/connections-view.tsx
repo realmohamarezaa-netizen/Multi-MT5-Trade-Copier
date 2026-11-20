@@ -578,9 +578,9 @@ export function ConnectionsView() {
       {/* status legend */}
       <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4 sm:p-6">
         <h2 className="text-sm font-semibold text-zinc-200">راهنمای وضعیت اتصال</h2>
-        <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
+        <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-6">
           {(
-            ["connected", "connecting", "reconnecting", "disconnected", "error"] as const
+            ["connected", "waiting", "connecting", "reconnecting", "disconnected", "error"] as const
           ).map((status) => {
             const meta = TERMINAL_STATUS_META[status];
             return (
@@ -595,7 +595,7 @@ export function ConnectionsView() {
 
       <div className="flex items-center gap-2 text-[11px] text-zinc-600">
         <MonoChip>tip</MonoChip>
-        اتصال کاملاً محلی است: موتور مستقیماً از طریق رابط رسمی متاتریدر ۵ به هر ترمینال وصل می‌شود؛ بدون اکسپرت، بدون فایل MQL5 و بدون هیچ ترافیکی غیر از اتصال خود ترمینال به بروکر.
+        اتصال کاملاً محلی است: موتور مستقیماً از طریق رابط رسمی متاتریدر ۵ به هر ترمینال وصل می‌شود؛ بدون اکسپرت، بدون فایل MQL5 و بدون هیچ ترافیکی غیر از اتصال خود ترمینال به بروکر. موتور هیچ‌وقت متاتریدر را باز نمی‌کند — فقط ترمینال‌هایی که خودتان باز کرده‌اید را پیدا و متصل می‌کند.
       </div>
     </div>
   );

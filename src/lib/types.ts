@@ -3,7 +3,7 @@
 // Used by engine, simulator, API routes and frontend.
 // ============================================================
 
-export type TerminalStatus = 'connected' | 'connecting' | 'disconnected' | 'reconnecting' | 'error'
+export type TerminalStatus = 'connected' | 'connecting' | 'waiting' | 'disconnected' | 'reconnecting' | 'error'
 export type TerminalRole = 'master' | 'slave' | 'none'
 
 export type LotMode = 'same' | 'fixed' | 'multiplier' | 'balance' | 'risk'

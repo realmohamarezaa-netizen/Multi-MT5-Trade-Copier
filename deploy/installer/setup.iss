@@ -5,7 +5,7 @@
 ; ============================================================
 
 #define MyAppName "Multi-MT5 Trade Copier"
-#define MyAppVersion "2.0.1"
+#define MyAppVersion "2.1.0"
 #define MyAppExeName "MT5CopierEngine.exe"
 
 [Setup]
@@ -36,7 +36,6 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "Additional icons:"
-Name: "autostart"; Description: "Start the engine automatically at Windows login"; GroupDescription: "Additional icons:"; Flags: unchecked
 
 [Files]
 ; ONEFILE engine: the dashboard UI is embedded inside the EXE; the SQLite DB
@@ -54,13 +53,12 @@ Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
-[Registry]
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "MT5CopierEngine"; ValueData: """{app}\{#MyAppExeName}"""; Flags: uninsdeletevalue; Tasks: autostart
-
 [Run]
 ; The engine opens its native desktop window by itself (splash skeleton,
 ; then the dashboard) - no browser needed.
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
+; v2.1.0: autostart was removed - clean up the Run value written by v2.0.x
+Filename: "{sys}\reg.exe"; Parameters: "DELETE HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v MT5CopierEngine /f"; Flags: runhidden; RunOnceId: "RemoveAutostart"
 
 [UninstallRun]
 ; Force-stop the console engine before file deletion (exit 0 = never blocks).

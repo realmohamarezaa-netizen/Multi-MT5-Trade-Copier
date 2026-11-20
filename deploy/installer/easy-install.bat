@@ -47,12 +47,8 @@ echo   [3/4] Creating shortcuts (Desktop + Start Menu)...
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$d=[Environment]::GetFolderPath('Desktop'); $p=[Environment]::GetFolderPath('Programs'); $ws=New-Object -ComObject WScript.Shell; $s=$ws.CreateShortcut(($d+'\MT5 Copier.lnk')); $s.TargetPath='%DEST%\MT5CopierEngine.exe'; $s.WorkingDirectory='%DEST%'; $s.IconLocation='%DEST%\MT5CopierEngine.exe,0'; $s.Description='Multi-MT5 Trade Copier'; $s.Save(); $f=$p+'\MT5 Copier'; New-Item -ItemType Directory -Force -Path $f | Out-Null; $s2=$ws.CreateShortcut(($f+'\MT5 Copier.lnk')); $s2.TargetPath='%DEST%\MT5CopierEngine.exe'; $s2.WorkingDirectory='%DEST%'; $s2.IconLocation='%DEST%\MT5CopierEngine.exe,0'; $s2.Save(); $u=$ws.CreateShortcut(($f+'\Uninstall MT5 Copier.lnk')); $u.TargetPath='%DEST%\Easy-Uninstall.bat'; $u.WorkingDirectory='%DEST%'; $u.Save()"
 
 echo.
-echo   [4/4] Start MT5 Copier automatically at Windows login?
-choice /C YN /N /M "   Press Y for yes, N for no: "
-if errorlevel 2 goto :skipautostart
-reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v MT5CopierEngine /t REG_SZ /d "\"%DEST%\MT5CopierEngine.exe\"" /f >nul
-echo   Autostart: ON
-:skipautostart
+echo   [4/4] Cleaning up any old autostart entry (v2.1.0 removed autostart)...
+reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v MT5CopierEngine /f >nul 2>&1
 
 echo.
 echo   Starting MT5 Copier (desktop app window opens automatically)...
