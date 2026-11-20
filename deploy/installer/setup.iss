@@ -58,7 +58,7 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 ; then the dashboard) - no browser needed.
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
 ; v2.1.0: autostart was removed - clean up the Run value written by v2.0.x
-Filename: "{sys}\reg.exe"; Parameters: "DELETE HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v MT5CopierEngine /f"; Flags: runhidden; RunOnceId: "RemoveAutostart"
+Filename: "{sys}\reg.exe"; Parameters: "DELETE HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v MT5CopierEngine /f"; Flags: runhidden
 
 [UninstallRun]
 ; Force-stop the console engine before file deletion (exit 0 = never blocks).
